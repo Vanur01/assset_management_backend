@@ -1,5 +1,5 @@
 import express from 'express';
-import assetRequestController from '../controllers/assetRequest.controller.js';
+import assetRequestController from '../controllers/Assetrequest.controller.js';
 import { authenticate, allowRoles } from '../middlewares/verifyToken.js';
 
 const router = express.Router();
