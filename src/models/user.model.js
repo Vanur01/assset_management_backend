@@ -311,13 +311,13 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
 userSchema.methods.generateAuthToken = function () {
   const payload = { _id: this._id, email: this.email, role: this.role };
   if (this.role === 'team' && this.adminId) payload.adminId = this.adminId;
-  return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || '7d' });
+  return jwt.sign(payload, "f764063ba30c2a1465967e1427f891e57bffe402c0c62a5216dee6ef910ff1b0", { expiresIn: process.env.JWT_EXPIRES_IN || '7d' });
 };
 
 userSchema.methods.generateRefreshToken = function () {
   return jwt.sign(
     { _id: this._id, type: 'refresh', role: this.role },
-    process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET,
+    "f764063ba30c2a1465967e1427f891e57bffe402c0c62a5216dee6ef910ff1b0",
     { expiresIn: '30d' }
   );
 };
