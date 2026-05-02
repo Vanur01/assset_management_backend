@@ -96,16 +96,6 @@ process.on("uncaughtException", (err) => {
     stack: err.stack,
     name: err.name,
   });
-  
-  // In production, give server time to handle current requests
-  if ("production") {
-    setTimeout(() => {
-      process.exit(1);
-    }, 1000);
-  } else {
-    process.exit(1);
-  }
-});
 
 process.on("unhandledRejection", (reason, promise) => {
   logger.error("UNHANDLED REJECTION! 💥", {
@@ -114,15 +104,5 @@ process.on("unhandledRejection", (reason, promise) => {
     promise,
   });
   
-  // In production, give server time to handle current requests
-  if ("production") {
-    setTimeout(() => {
-      process.exit(1);
-    }, 1000);
-  } else {
-    process.exit(1);
-  }
-});
-
 // ==================== START THE SERVER ====================
 startServer();
