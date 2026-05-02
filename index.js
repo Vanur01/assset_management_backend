@@ -32,8 +32,6 @@ const startServer = async () => {
       🌍 Environment: ${NODE_ENV}
       🔗 API: http://localhost:${PORT}/api/v1
       📊 Health: http://localhost:${PORT}/health
-      ${process.env.ENABLE_API_DOCS === "true" ? `📚 API Docs: http://localhost:${PORT}/api-docs` : ""}
-      `);
     });
 
     // Handle server errors
@@ -100,7 +98,7 @@ process.on("uncaughtException", (err) => {
   });
   
   // In production, give server time to handle current requests
-  if (process.env.NODE_ENV === "production") {
+  if ("production") {
     setTimeout(() => {
       process.exit(1);
     }, 1000);
@@ -117,7 +115,7 @@ process.on("unhandledRejection", (reason, promise) => {
   });
   
   // In production, give server time to handle current requests
-  if (process.env.NODE_ENV === "production") {
+  if ("production") {
     setTimeout(() => {
       process.exit(1);
     }, 1000);
