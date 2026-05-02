@@ -8,10 +8,11 @@ import logger from "./src/utils/logger.js";
 // Load environment variables
 dotenv.config();
 
-const PORT = 9001;
-const NODE_ENV = "development";
+// Use Render dynamic port
+const PORT = process.env.PORT || 9001;
+const NODE_ENV = process.env.NODE_ENV || "development";
 
-// ==================== GRACEFUL SHUTDOWN ====================
+// ==================== GLOBAL VARIABLES ====================
 let server;
 
 // ==================== START SERVER ====================
@@ -27,20 +28,21 @@ const startServer = async () => {
     // Start listening
     server.listen(PORT, () => {
       logger.info(`
-      🚀 Server is running!
-      📡 Port: ${PORT}
-      🌍 Environment: ${NODE_ENV}
-      🔗 API: http://localhost:${PORT}/api/v1
-      📊 Health: http://localhost:${PORT}/health
+🚀 Server is running!
+📡 Port: ${PORT}
+🌍 Environment: ${NODE_ENV}
+🔗 API: http://localhost:${PORT}/api/v1
+📊 Health: http://localhost:${PORT}/health
+      `);
     });
 
     // Handle server errors
     server.on("error", (error) => {
       if (error.code === "EADDRINUSE") {
-        logger.error(`Port ${PORT} is already in use`);
+        logger.error(`❌ Port ${PORT} is already in use`);
         process.exit(1);
       } else {
-        logger.error("Server error:", error);
+        logger.error("❌ Server error:", error);
       }
     });
 
@@ -50,59 +52,58 @@ const startServer = async () => {
   }
 };
 
-// ==================== GRACEFUL SHUTDOWN HANDLERS ====================
+// ==================== GRACEFUL SHUTDOWN ====================
 
-// Handle graceful shutdown
 const gracefulShutdown = async (signal) => {
-  logger.info(`${signal} received. Starting graceful shutdown...`);
+  logger.info(`⚠️ ${signal} received. Starting graceful shutdown...`);
 
-  // Stop accepting new connections
   if (server) {
     server.close(async () => {
-      logger.info("HTTP server closed");
+      logger.info("🛑 HTTP server closed");
 
       try {
-        // Close MongoDB connection
         await mongoose.connection.close(false);
-        logger.info("MongoDB connection closed");
+        logger.info("🗄️ MongoDB connection closed");
 
-        // Close other connections (Redis, etc.) if needed
-        
-        logger.info("Graceful shutdown completed");
+        logger.info("✅ Graceful shutdown completed");
         process.exit(0);
       } catch (error) {
-        logger.error("Error during graceful shutdown:", error);
+        logger.error("❌ Error during shutdown:", error);
         process.exit(1);
       }
     });
 
-    // Force close if not closed within 30 seconds
+    // Force shutdown after 30s
     setTimeout(() => {
-      logger.error("Forced shutdown due to timeout");
+      logger.error("⏳ Forced shutdown due to timeout");
       process.exit(1);
     }, 30000);
   }
 };
 
-// Handle termination signals
+// ==================== SIGNAL HANDLERS ====================
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
-// ==================== UNCAUGHT ERRORS ====================
+// ==================== ERROR HANDLERS ====================
 
 process.on("uncaughtException", (err) => {
-  logger.error("UNCAUGHT EXCEPTION! 💥", {
+  logger.error("💥 UNCAUGHT EXCEPTION!", {
     error: err.message,
     stack: err.stack,
     name: err.name,
   });
+  process.exit(1);
+});
 
 process.on("unhandledRejection", (reason, promise) => {
-  logger.error("UNHANDLED REJECTION! 💥", {
+  logger.error("💥 UNHANDLED REJECTION!", {
     reason: reason?.message || reason,
     stack: reason?.stack,
     promise,
   });
-  
-// ==================== START THE SERVER ====================
+  process.exit(1);
+});
+
+// ==================== START SERVER ====================
 startServer();
