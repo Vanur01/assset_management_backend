@@ -8,8 +8,8 @@ import logger from "./src/utils/logger.js";
 // Load environment variables
 dotenv.config();
 
-const PORT = process.env.PORT || 9001;
-const NODE_ENV = process.env.NODE_ENV || "development";
+const PORT = 9001;
+const NODE_ENV = "development";
 
 // ==================== GRACEFUL SHUTDOWN ====================
 let server;
