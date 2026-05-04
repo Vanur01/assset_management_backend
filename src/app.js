@@ -49,7 +49,7 @@ app.set("trust proxy", 1);
 const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:3001",
-  "https://asset-client-84k8.vercel.app"
+  "https://asset-client-sand.vercel.app"
 ];
 
 const corsOptions = {
