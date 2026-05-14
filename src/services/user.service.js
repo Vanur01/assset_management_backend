@@ -1,6 +1,7 @@
 import User from '../models/user.model.js';
 import Asset from '../models/asset.model.js';
 import Assignment from '../models/AssignedChecklist.model.js';
+import Contact from '../models/contact.model.js'
 import crypto from 'crypto';
 import mongoose from 'mongoose';
 import ExcelJS from 'exceljs';
@@ -793,6 +794,96 @@ class UserService {
             default: return base;
         }
     }
+
+
+    async createContact(data) {
+        const {
+            fullName,
+            email,
+            phone,
+            message,
+        } = data;
+
+        const contacts = await Contact.create({
+            fullName,
+            email,
+            phone,
+            message,
+        });
+
+       return contacts._doc;
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Get All Contact Messages
+    // ─────────────────────────────────────────────────────────────
+    async getAllContacts(filters = {}) {
+        const {
+            page = 1,
+            limit = 10,
+            search = "",
+        } = filters;
+
+        const query = {};
+
+        // Search
+        if (search) {
+            query.$or = [
+                { fullName: { $regex: search, $options: "i" } },
+                { email: { $regex: search, $options: "i" } },
+                { phone: { $regex: search, $options: "i" } },
+            ];
+        }
+
+        const skip = (page - 1) * limit;
+
+        const [contacts, total] = await Promise.all([
+            Contact.find(query)
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(limit),
+
+            Contact.countDocuments(query),
+        ]);
+
+        return {
+            pagination: {
+                total,
+                page,
+                limit,
+                totalPages: Math.ceil(total / limit),
+                contacts
+            },
+        };
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Get Contact By ID
+    // ─────────────────────────────────────────────────────────────
+    async getContactById(contactId) {
+        const contact = await Contact.findById(contactId);
+
+        if (!contact) {
+            throw new NotFoundError("Contact message not found");
+        }
+
+        return contact._doc;
+    }
+
+    async deleteContact(contactId) {
+        const contact = await Contact.findById(contactId);
+
+        if (!contact) {
+            throw new NotFoundError("Contact message not found");
+        }
+
+        await Contact.findByIdAndDelete(contactId);
+        return {
+            success: true,
+            message: "Contact deleted successfully",
+        };
+    }
+
 }
 
 export default new UserService();

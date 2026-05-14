@@ -82,12 +82,6 @@ const checklistRequestSchema = new mongoose.Schema({
     type: String,
     trim: true,
   },
-  reviewComments: {
-    type: String,
-    trim: true,
-  },
-
-  // Result
   createdChecklistId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "Checklist",
