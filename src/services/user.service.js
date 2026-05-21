@@ -199,26 +199,41 @@ class UserService {
     }
 
     async updateClient(clientId, updateData) {
-        const client = await User.findOne({ _id: clientId, role: 'admin' });
-        if (!client) throw new NotFoundError('Client not found');
+        const client = await User.findOne({
+            _id: clientId,
+            role: 'admin'
+        });
 
+        if (!client) {
+            throw new NotFoundError('Client not found');
+        }
+
+        // Check email uniqueness
         if (updateData.email && updateData.email !== client.email) {
-            const existing = await User.findOne({ email: updateData.email });
-            if (existing) throw new ConflictError('Email already in use');
+            const existing = await User.findOne({
+                email: updateData.email
+            });
+
+            if (existing) {
+                throw new ConflictError('Email already in use');
+            }
         }
 
         if (updateData.extendDays) {
-            const currentEnd = client.subscriptionEndDate || new Date();
-            currentEnd.setDate(currentEnd.getDate() + updateData.extendDays);
-            updateData.subscriptionEndDate = currentEnd;
+            const baseDate = client.subscriptionEndDate
+                ? new Date(client.subscriptionEndDate)
+                : new Date();
+
+            baseDate.setDate(baseDate.getDate() + Number(updateData.extendDays));
+            updateData.subscriptionEndDate = baseDate;
             delete updateData.extendDays;
         }
 
         Object.assign(client, updateData);
         await client.save();
-
         const response = client.toObject();
         delete response.password;
+
         return response;
     }
 
@@ -749,7 +764,7 @@ class UserService {
     }
 
     async getMyAssignedAssets(memberId) {
-        return await Assignment.find({ primaryMember: memberId, status: { $ne: 'completed' } }).populate('assetId', 'assetName assetId currentLocation assetCategory').lean();
+        return await Assignment.find({ primaryMember: memberId }).populate('assetId', 'assetName assetId currentLocation assetCategory').lean();
     }
 
     async getMyScheduledTasks(memberId) {
@@ -811,7 +826,7 @@ class UserService {
             message,
         });
 
-       return contacts._doc;
+        return contacts._doc;
     }
 
     // ─────────────────────────────────────────────────────────────

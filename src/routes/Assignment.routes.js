@@ -2,105 +2,66 @@ import express from 'express';
 import AssignmentController from '../controllers/Assignment.controller.js';
 import { authenticate, allowRoles } from '../middlewares/verifyToken.js';
 import { upload } from '../middlewares/upload.js';
-import {
-  validateCreateAdminAssignment,
-  validateCreateTeamAssignment,
-  validateGetAssignments,
-  validateAssignmentId,
-  validateUpdateAssignment,
-  validateSubmitResponse,
-  validateReviewAssignment
-} from '../validation/assignedChecklist.validation.js';
-import { handleValidation } from '../validation/validationResult.js';
 
 const router = express.Router();
 router.use(authenticate);
 
-// ==================== STATISTICS ====================
+// ==================== STATISTICS & DASHBOARD ====================
 router.get(
   '/statistics',
+  allowRoles('super_admin', 'admin', 'team'),
   AssignmentController.getStatistics
 );
 
-// ==================== EXPORT ====================
+// ==================== EXPORT & DOWNLOAD ====================
 router.get(
   '/export',
   allowRoles('super_admin', 'admin'),
   AssignmentController.exportAssignments
 );
 
-// ==================== CREATE ASSIGNMENTS ====================
-
-// Super Admin assigns to Admin
-router.post(
-  '/assign-to-admin',
-  allowRoles('super_admin'),
-  AssignmentController.assignToAdmin
-);
-
-// Admin assigns to Team Member
-router.post(
-  '/assign-to-team',
-  allowRoles('admin'),
-  AssignmentController.assignToTeam
-);
-
-// ==================== GET ASSIGNMENTS ====================
-router.get(
-  '/',
-  allowRoles('super_admin', 'admin', 'team'),
-  validateGetAssignments,
-  handleValidation,
-  AssignmentController.getAssignments
-);
-
+// ==================== CALENDAR ====================
 router.get(
   '/calendar',
   allowRoles('super_admin', 'admin', 'team'),
   AssignmentController.getCalendarTasks
 );
 
+// ==================== INSPECTION HISTORY (SPECIFIC PATH - MUST BE BEFORE /:id) ====================
 router.get(
-  '/my/history',
-  allowRoles('team'),
+  '/history',
+  allowRoles('super_admin', 'admin', 'team'),
   AssignmentController.getInspectionHistory
 );
 
+// ==================== SUBMISSION MANAGEMENT ====================
 router.get(
-  '/:id',
-  allowRoles('super_admin', 'admin'),
-  validateAssignmentId,
-  handleValidation,
-  AssignmentController.getAssignmentById
-);
-
-router.get(
-  '/:id/details',
+  '/submissions/:id',
   allowRoles('super_admin', 'admin', 'team'),
-  validateAssignmentId,
-  handleValidation,
-  AssignmentController.getAssignmentDetails
-);
-
-// ==================== UPDATE & DELETE ====================
-router.patch(
-  '/:id',
-  allowRoles('super_admin', 'admin'),
-  validateAssignmentId,
-  validateUpdateAssignment,
-  handleValidation,
-  AssignmentController.updateAssignment
+  AssignmentController.getSubmissionDetail
 );
 
 router.delete(
-  '/:id',
+  '/:id/submission',
   allowRoles('super_admin', 'admin'),
-  validateAssignmentId,
-  handleValidation,
-  AssignmentController.deleteAssignment
+  AssignmentController.deleteSubmission
 );
 
-// ==================== SUBMISSIONS & REVIEW ====================
+
+// ==================== CREATE ASSIGNMENTS ====================
+router.post(
+  '/assign-to-admin',
+  allowRoles('super_admin'),
+  AssignmentController.assignToAdmin
+);
+
+router.post(
+  '/assign-to-team',
+  allowRoles('admin'),
+  AssignmentController.assignToTeam
+);
+
+// ==================== CHECKLIST-SCOPED ROUTES ====================
 router.get(
   '/checklist/:checklistId/submissions',
   allowRoles('super_admin', 'admin'),
@@ -108,23 +69,63 @@ router.get(
 );
 
 router.get(
-  '/:id/submission',
+  '/checklist/:checklistId/assignees',
+  allowRoles('super_admin', 'admin'),
+  AssignmentController.getAssignees
+);
+
+router.get(
+  '/checklist/:checklistId/analytics',
+  allowRoles('super_admin', 'admin'),
+  AssignmentController.getChecklistAnalytics
+);
+
+// ==================== LIST ALL ASSIGNMENTS ====================
+router.get(
+  '/',
   allowRoles('super_admin', 'admin', 'team'),
-  validateAssignmentId,
-  handleValidation,
-  AssignmentController.getSubmissionDetail
+  AssignmentController.getAssignments
+);
+
+// ==================== PARAMETERIZED ROUTES (MUST BE LAST) ====================
+// Single assignment by ID - these must come AFTER all specific routes
+router.get(
+  '/:id',
+  allowRoles('super_admin', 'admin', 'team'),
+  AssignmentController.getAssignmentById
+);
+
+router.get(
+  '/:id/details',
+  allowRoles('super_admin', 'admin', 'team'),
+  AssignmentController.getAssignmentDetails
+);
+
+router.patch(
+  '/:id',
+  allowRoles('super_admin', 'admin'),
+  AssignmentController.updateAssignment
+);
+
+router.delete(
+  '/:id',
+  allowRoles('super_admin', 'admin'),
+  AssignmentController.deleteAssignment
+);
+
+router.post(
+  '/:id/clear',
+  allowRoles('team', 'admin', 'super_admin'),
+  AssignmentController.clearChecklist
 );
 
 router.patch(
   '/:id/review',
   allowRoles('super_admin', 'admin'),
-  validateAssignmentId,
-  validateReviewAssignment,
-  handleValidation,
   AssignmentController.reviewSubmission
 );
 
-// ==================== INSPECTION ACTIONS (Team Member) ====================
+// ==================== INSPECTION ACTIONS ====================
 router.post(
   '/:id/submit',
   allowRoles('team', 'admin'),
@@ -139,30 +140,15 @@ router.post(
 router.post(
   '/:id/draft',
   allowRoles('team'),
-  validateAssignmentId,
-  handleValidation,
   AssignmentController.saveDraft
 );
 
-router.post(
-  '/:id/clear',
-  allowRoles('team', 'admin'),
-  validateAssignmentId,
-  handleValidation,
-  AssignmentController.clearChecklist
-);
-
-// ==================== ASSIGNEES & ANALYTICS ====================
-router.get(
-  '/checklist/:checklistId/assignees',
-  allowRoles('super_admin', 'admin'),
-  AssignmentController.getAssignees
-);
-
-router.get(
-  '/checklist/:checklistId/analytics',
-  allowRoles('super_admin', 'admin'),
-  AssignmentController.getChecklistAnalytics
-);
+// Debug: Log all registered routes
+console.log('Assignment Routes Registered:');
+router.stack.forEach((layer) => {
+  if (layer.route) {
+    console.log(`${Object.keys(layer.route.methods).join(',')} ${layer.route.path}`);
+  }
+});
 
 export default router;

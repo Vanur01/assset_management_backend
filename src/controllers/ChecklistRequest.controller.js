@@ -8,12 +8,13 @@ class ChecklistRequestController {
         console.log("Request body:", req.body);
         console.log("User ID:", req.user._id);
         console.log("Files uploaded:", req.files?.length || 0);
-        
+
         const result = await ChecklistRequestService.createRequest(
             req.user._id,
             req.body,
-            req.files // This should be req.files (plural) for array upload
+            req.files || []
         );
+        
         return sendResponse(res, 201, 'Checklist request submitted successfully', result);
     });
 
@@ -23,33 +24,61 @@ class ChecklistRequestController {
             req.user.role,
             req.query
         );
+        
         return sendResponse(res, 200, 'Requests retrieved successfully', result);
     });
 
     getRequest = asyncHandler(async (req, res) => {
+        const { id } = req.params;
+        
+        if (!id || id === 'undefined') {
+            return sendResponse(res, 400, 'Invalid request ID', null);
+        }
+        
         const result = await ChecklistRequestService.getRequestById(
-            req.params.id,
+            id,
             req.user._id,
             req.user.role
         );
+        
         return sendResponse(res, 200, 'Request retrieved successfully', result);
     });
 
     reviewRequest = asyncHandler(async (req, res) => {
+        const { id } = req.params;
+        const { status, rejectionReason, resultingChecklistId, resultingChecklistName } = req.body;
+        
+        if (!id || id === 'undefined') {
+            return sendResponse(res, 400, 'Invalid request ID', null);
+        }
+        
         const result = await ChecklistRequestService.reviewRequest(
-            req.params.id,
+            id,
             req.user._id,
-            req.body
+            {
+                status,
+                rejectionReason,
+                resultingChecklistId,
+                resultingChecklistName
+            }
         );
+        
         return sendResponse(res, 200, 'Request reviewed successfully', result);
     });
 
     deleteRequest = asyncHandler(async (req, res) => {
+        const { id } = req.params;
+        
+        if (!id || id === 'undefined') {
+            return sendResponse(res, 400, 'Invalid request ID', null);
+        }
+        
         const result = await ChecklistRequestService.deleteRequest(
-            req.params.id,
+            id,
             req.user._id,
             req.user.role
         );
+        
         return sendResponse(res, 200, result.message, null);
     });
 
@@ -58,8 +87,23 @@ class ChecklistRequestController {
             req.user._id,
             req.user.role
         );
+        
         return sendResponse(res, 200, 'Statistics retrieved successfully', result);
     });
+
+
+    getMyRequests = asyncHandler(async (req, res) => {
+        // Helper method for users to see only their own requests
+        const result = await ChecklistRequestService.getRequests(
+            req.user._id,
+            'user', // Force user role to only see their own
+            req.query
+        );
+        
+        return sendResponse(res, 200, 'Your requests retrieved successfully', result);
+    });
+
+
 }
 
 export default new ChecklistRequestController();

@@ -97,20 +97,17 @@ class ChecklistService {
   // ==================== CREATE CHECKLIST ====================
 
   async createChecklist(userId, userRole, data) {
-    const { name, description, category, tags, sections, type, status = 'active' } = data;
-
-    this.validateSections(sections);
+    const { name, description, category, tags, type } = data;
 
     const checklist = await Checklist.create({
       name,
       description: description || '',
       category: category || 'General',
       tags: tags || [],
-      sections,
       type,
       createdBy: userId,
       createdByRole: userRole,
-      status,
+      status: "active",
       isApproved: type === 'global' ? true : false,
       approvedBy: type === 'global' ? userId : null,
       approvedAt: type === 'global' ? new Date() : null,
@@ -276,7 +273,7 @@ class ChecklistService {
       clonedFrom: original._id,
       createdBy: userId,
       createdByRole: userRole,
-      status: 'draft',
+      status: 'active',
       isApproved: false,
     });
 

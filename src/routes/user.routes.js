@@ -44,9 +44,9 @@ router.delete('/team/:id', authenticate, allowRoles('admin'), UserController.del
 router.get('/team/me/profile', authenticate, allowRoles('team'), UserController.getMyProfile);
 router.patch('/team/me/profile', authenticate, allowRoles('team'), validateUpdateMyProfile, handleValidation, UserController.updateMyProfile);
 router.post('/team/me/change-password', authenticate, allowRoles('team'), validateChangeMyPassword, handleValidation, UserController.changeMyPassword);
-router.get('/team/me/recent-inspections', authenticate, allowRoles('team'), UserController.getMyRecentInspections);
-router.get('/team/me/assigned-assets', authenticate, allowRoles('team'), UserController.getMyAssignedAssets);
-router.get('/team/me/scheduled-tasks', authenticate, allowRoles('team'), UserController.getMyScheduledTasks);
+router.get('/team/me/recent-inspections', authenticate, allowRoles('team', "admin"), UserController.getMyRecentInspections);
+router.get('/team/me/assigned-assets', authenticate, allowRoles('team', "admin"), UserController.getMyAssignedAssets);
+router.get('/team/me/scheduled-tasks', authenticate, allowRoles('team', "admin"), UserController.getMyScheduledTasks);
 
 // ================= contact routes =======================
 router.post('/contact', UserController.createContact);

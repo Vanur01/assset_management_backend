@@ -5,7 +5,7 @@ import { sendResponse } from '../utils/response.js';
 class AssignmentController {
 
   // ==================== CREATE ====================
-  
+
   // Super Admin assigns to Admin
   assignToAdmin = asyncHandler(async (req, res) => {
     const result = await AssignmentService.assignChecklistToAdmin(
@@ -16,18 +16,18 @@ class AssignmentController {
     return sendResponse(res, 201, 'Checklist assigned to admin successfully', result);
   });
 
-  // Admin assigns to Team Member
+  // Admin assigns to Team Members
   assignToTeam = asyncHandler(async (req, res) => {
     const result = await AssignmentService.assignChecklistToTeam(
       req.user._id,
       req.user.role,
       req.body
     );
-    return sendResponse(res, 201, 'Checklist assigned to team member successfully', result);
+    return sendResponse(res, 201, 'Checklist assigned to team members successfully', result);
   });
 
   // ==================== GET ASSIGNMENTS ====================
-  
+
   getAssignments = asyncHandler(async (req, res) => {
     const result = await AssignmentService.getAssignments(
       req.user._id,
@@ -38,12 +38,7 @@ class AssignmentController {
   });
 
   getAssignmentById = asyncHandler(async (req, res) => {
-    console.log("user...", req.user)
-    const result = await AssignmentService.getAssignmentById(
-      req.params.id,
-      req.user._id,
-      req.user.role
-    );
+    const result = await AssignmentService.getAssignmentById(req.params.id);
     return sendResponse(res, 200, 'Assignment retrieved successfully', result);
   });
 
@@ -57,7 +52,7 @@ class AssignmentController {
   });
 
   // ==================== UPDATE & DELETE ====================
-  
+
   updateAssignment = asyncHandler(async (req, res) => {
     const result = await AssignmentService.updateAssignment(
       req.params.id,
@@ -78,7 +73,7 @@ class AssignmentController {
   });
 
   // ==================== SUBMISSIONS ====================
-  
+
   getSubmissionsForChecklist = asyncHandler(async (req, res) => {
     const result = await AssignmentService.getSubmissionsForChecklist(
       req.params.checklistId,
@@ -98,6 +93,15 @@ class AssignmentController {
     return sendResponse(res, 200, 'Submission detail retrieved successfully', result);
   });
 
+  deleteSubmission = asyncHandler(async (req, res) => {
+    const result = await AssignmentService.deleteSubmission(
+      req.params.id,
+      req.user._id,
+      req.user.role
+    );
+    return sendResponse(res, 200, result.message, result);
+  });
+
   reviewSubmission = asyncHandler(async (req, res) => {
     const result = await AssignmentService.reviewSubmission(
       req.params.id,
@@ -109,9 +113,8 @@ class AssignmentController {
   });
 
   // ==================== INSPECTION (Team Member) ====================
-  
+
   submitInspection = asyncHandler(async (req, res) => {
-    console.log("user...", req.user)
     const result = await AssignmentService.submitInspection(
       req.params.id,
       req.user._id,
@@ -141,7 +144,7 @@ class AssignmentController {
   });
 
   // ==================== LISTS & VIEWS ====================
-  
+
   getAssignees = asyncHandler(async (req, res) => {
     const result = await AssignmentService.getAssignees(
       req.params.checklistId,
@@ -169,7 +172,7 @@ class AssignmentController {
   });
 
   // ==================== ANALYTICS & STATISTICS ====================
-  
+
   getChecklistAnalytics = asyncHandler(async (req, res) => {
     const result = await AssignmentService.getChecklistAnalytics(
       req.params.checklistId,
@@ -189,17 +192,17 @@ class AssignmentController {
   });
 
   // ==================== EXPORT ====================
-  
+
   exportAssignments = asyncHandler(async (req, res) => {
     const workbook = await AssignmentService.exportAssignments(
       req.user._id,
       req.user.role,
       req.query
     );
-    
+
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename=assignments_${Date.now()}.xlsx`);
-    
+
     await workbook.xlsx.write(res);
     res.end();
   });

@@ -1,67 +1,43 @@
 import express from 'express';
 import AssetController from '../controllers/asset.controller.js';
-import { authenticate, allowRoles, ROLES } from '../middlewares/verifyToken.js';
+import { authenticate } from '../middlewares/verifyToken.js';
 import { upload } from '../middlewares/upload.js';
 
 const router = express.Router();
 
-// Apply authentication to all routes
 router.use(authenticate);
 
-// ==================== ASSET CRUD OPERATIONS ====================
-router.post('/', allowRoles(ROLES.ADMIN, ROLES.TEAM), AssetController.createAsset);
-router.get('/', allowRoles(ROLES.ADMIN, ROLES.TEAM), AssetController.getAllAssets);
-router.get('/deleted', allowRoles(ROLES.ADMIN), AssetController.getDeletedAssets);
-router.get('/:id', allowRoles(ROLES.ADMIN, ROLES.TEAM), AssetController.getAssetById);
-router.put('/:id', allowRoles(ROLES.ADMIN, ROLES.TEAM), AssetController.updateAsset);
-router.delete('/:id', allowRoles(ROLES.ADMIN, ROLES.TEAM), AssetController.deleteAsset);
-router.patch('/:id/status', allowRoles(ROLES.ADMIN, ROLES.TEAM), AssetController.updateAssetStatus);
-router.post('/:id/restore', allowRoles(ROLES.ADMIN), AssetController.restoreAsset);
+const setUserContext = (req, res, next) => {
+  req.userRole = req.user?.role;
+  req.userId = req.user?._id;
+  req.adminId = req.user?.adminId || req.user?._id;
+  next();
+};
 
-// ==================== ASSET IMAGE MANAGEMENT ====================
-router.post(
-  '/:id/images',
-  allowRoles(ROLES.ADMIN, ROLES.TEAM),
-  upload.single('image'),
-  AssetController.addAssetImage
-);
-router.post(
-  '/:id/images/multiple',
-  allowRoles(ROLES.ADMIN, ROLES.TEAM),
-  upload.array('images', 10),
-  AssetController.addMultipleAssetImages
-);
-router.delete(
-  '/:id/images/:imageId',
-  allowRoles(ROLES.ADMIN, ROLES.TEAM),
-  AssetController.removeAssetImage
-);
-router.put(
-  '/:id/images/:imageId/primary',
-  allowRoles(ROLES.ADMIN, ROLES.TEAM),
-  AssetController.setPrimaryImage
-);
+router.use(setUserContext);
 
-// ==================== CHILD ASSET MANAGEMENT ====================
-router.post('/:id/link-children', allowRoles(ROLES.ADMIN, ROLES.TEAM), AssetController.linkChildAssets);
-router.delete('/:id/children/:childId', allowRoles(ROLES.ADMIN, ROLES.TEAM), AssetController.unlinkChildAsset);
-router.get('/:id/children', allowRoles(ROLES.ADMIN, ROLES.TEAM), AssetController.getChildAssets);
+// ==================== STATIC ROUTES (must come before /:id) ====================
 
-// ==================== ASSET REQUEST APPROVAL ====================
-router.post('/requests/:requestId/approve', allowRoles(ROLES.ADMIN), AssetController.approveAssetRequest);
-router.post('/requests/:requestId/reject', allowRoles(ROLES.ADMIN), AssetController.rejectAssetRequest);
+// Asset list and create
+router.get('/', AssetController.getAssetList);
+router.post('/add', AssetController.addAsset);                         // Admin only
 
-// ==================== CLONE OPERATIONS ====================
-router.post('/:id/clone', allowRoles(ROLES.ADMIN, ROLES.TEAM), AssetController.cloneAsset);
-router.get('/:id/clones', allowRoles(ROLES.ADMIN, ROLES.TEAM, ROLES.SUPER_ADMIN), AssetController.getAssetClones);
-router.get('/:id/clone-tree', allowRoles(ROLES.ADMIN), AssetController.getCloneTree);
+// Asset requests
+router.post('/request', AssetController.addAssetRequest);              // Team only
+router.get('/requests/parent', AssetController.getParentAssetRequests); // Admin: all | Team: own
+router.get('/requests/child', AssetController.getChildAssetRequests);   // Admin: all | Team: own
+router.get('/requests/my', AssetController.getMyRequests);              // Team only
+router.post('/requests/:requestId/process', AssetController.processAssetRequest); // Admin only
 
-// ==================== BULK OPERATIONS ====================
-router.post('/bulk/delete', allowRoles(ROLES.ADMIN), AssetController.bulkDeleteAssets);
-router.post('/bulk/status', allowRoles(ROLES.ADMIN, ROLES.TEAM), AssetController.bulkUpdateAssetStatus);
+// ==================== DYNAMIC ROUTES (/:id and sub-routes) ====================
 
-// ==================== EXPORT & STATISTICS ====================
-router.get('/export/all', allowRoles(ROLES.ADMIN, ROLES.TEAM), AssetController.exportAssets);
-router.get('/statistics/summary', allowRoles(ROLES.ADMIN, ROLES.TEAM), AssetController.getAssetStatistics);
+router.get('/:id', AssetController.getAssetById);
+router.put('/:id', AssetController.editAsset);
+router.delete('/:id', AssetController.deleteAsset);
+router.patch('/:id/status', AssetController.updateAssetStatus);
+router.post('/:id/images', upload.single('image'), AssetController.uploadAssetImage);
+router.post('/:id/link', AssetController.linkAsset);
+router.post('/:id/clone', AssetController.cloneAsset);
+router.get('/:id/clones', AssetController.getCloneList);
 
 export default router;

@@ -86,14 +86,12 @@ const checklistSchema = new mongoose.Schema({
 
   status: {
     type: String,
-    enum: ["active", "inactive", "draft"],
     default: "active",
     index: true,
   },
 
   importedFromExcel: { type: Boolean, default: false },
   excelFileName: { type: String, default: null },
-
   isApproved: { type: Boolean, default: false },
   approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
   approvedAt: { type: Date, default: null },
