@@ -8,10 +8,6 @@ class AssetController {
     try {
       const { userRole, userId, adminId } = req;
 
-      if (userRole !== 'admin') {
-        return res.status(403).json({ success: false, error: 'Only admins can add assets directly' });
-      }
-
       const asset = await AssetService.addAsset(req.body, adminId, userId);
       res.status(201).json({ success: true, data: asset });
     } catch (error) {
@@ -106,7 +102,7 @@ class AssetController {
       const imageData = {
         name: req.file.originalname,
         filename: req.file.filename,
-        url: `http://localhost:9001/uploads/assets/${req.file.filename}`,
+        url: `https://assset-management-backend-4.onrender.com/uploads/assets/${req.file.filename}`,
         fileSize: req.file.size,
         mimeType: req.file.mimetype
       };
