@@ -39,7 +39,7 @@ router.get(
 // Organization activity (admin only - see team activity)
 router.get(
   '/organization',
-  allowRoles('admin'),
+   allowRoles('super_admin', 'admin'),
   auditLogController.getOrganizationActivity
 );
 

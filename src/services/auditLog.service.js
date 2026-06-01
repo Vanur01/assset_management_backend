@@ -69,7 +69,6 @@ class AuditLogService {
         metadata
       });
       
-      // Don't await to avoid blocking, but log error if fails
       console.log(`[AUDIT] ${action} on ${resource} by ${actorRole} (${actorEmail}) - ${status}`);
       return auditLog;
     } catch (error) {
@@ -147,9 +146,6 @@ class AuditLogService {
         query.actor = this.toObjectId(userId);
       } else if (userRole === 'admin') {
         // Admins can see their organization's logs (their own + their team members)
-        // This includes logs where:
-        // 1. The actor is the admin themselves
-        // 2. The adminId matches the admin (logs from their team members)
         query.$or = [
           { actor: this.toObjectId(userId) },
           { adminId: this.toObjectId(adminId) }
@@ -159,13 +155,25 @@ class AuditLogService {
       
       const skip = (page - 1) * limit;
       
+      // Build population paths - only populate fields that exist in schema
+      const populateOptions = [];
+      
+      // Only populate 'actor' if it's a reference in the schema
+      if (this.isReferenceField('actor')) {
+        populateOptions.push({ path: 'actor', select: 'name email role' });
+      }
+      
+      // Only populate 'adminId' if it's a reference in the schema
+      if (this.isReferenceField('adminId')) {
+        populateOptions.push({ path: 'adminId', select: 'name email role' });
+      }
+      
       const [auditLogs, total] = await Promise.all([
         AuditLog.find(query)
           .sort({ createdAt: -1 })
           .skip(skip)
           .limit(limit)
-          .populate('actor', 'name email role')
-          .populate('adminId', 'name email')
+          .populate(populateOptions)
           .lean(),
         AuditLog.countDocuments(query)
       ]);
@@ -190,17 +198,38 @@ class AuditLogService {
   }
 
   /**
+   * Helper method to check if a field is a reference in the schema
+   */
+  isReferenceField(fieldName) {
+    try {
+      const schemaPath = AuditLog.schema.paths[fieldName];
+      return schemaPath && 
+             schemaPath.instance === 'ObjectID' && 
+             schemaPath.options && 
+             schemaPath.options.ref;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /**
    * Get audit trail for a specific resource
    */
   async getResourceAuditTrail(resourceId, resource, limit = 50) {
     try {
+      const populateOptions = [];
+      
+      if (this.isReferenceField('actor')) {
+        populateOptions.push({ path: 'actor', select: 'name email role' });
+      }
+      
       const auditLogs = await AuditLog.find({ 
         resourceId: this.toObjectId(resourceId), 
         resource 
       })
         .sort({ createdAt: -1 })
         .limit(limit)
-        .populate('actor', 'name email role')
+        .populate(populateOptions)
         .lean();
       
       return {
@@ -280,20 +309,32 @@ class AuditLogService {
             ],
             recentActivity: [
               { $sort: { createdAt: -1 } },
-              { $limit: 10 },
-              {
-                $lookup: {
-                  from: 'users',
-                  localField: 'actor',
-                  foreignField: '_id',
-                  as: 'actorDetails'
-                }
-              },
-              { $unwind: { path: '$actorDetails', preserveNullAndEmptyArrays: true } }
+              { $limit: 10 }
             ]
           }
         }
       ]);
+      
+      // Fetch actor details separately for recent activity if needed
+      let recentActivityWithDetails = stats[0].recentActivity || [];
+      
+      // If we need actor details, fetch them separately to avoid population issues
+      if (recentActivityWithDetails.length > 0 && this.isReferenceField('actor')) {
+        const actorIds = recentActivityWithDetails.map(activity => activity.actor).filter(id => id);
+        if (actorIds.length > 0) {
+          const User = mongoose.model('User');
+          const actors = await User.find({ _id: { $in: actorIds } })
+            .select('name email role')
+            .lean();
+          
+          const actorMap = new Map(actors.map(actor => [actor._id.toString(), actor]));
+          
+          recentActivityWithDetails = recentActivityWithDetails.map(activity => ({
+            ...activity,
+            actorDetails: activity.actor ? actorMap.get(activity.actor.toString()) : null
+          }));
+        }
+      }
       
       return {
         success: true,
@@ -305,7 +346,7 @@ class AuditLogService {
           actionsToday: stats[0].actionsToday[0]?.count || 0,
           actionsLast7Days: stats[0].actionsLast7Days,
           uniqueActors: stats[0].uniqueActors[0]?.count || 0,
-          recentActivity: stats[0].recentActivity
+          recentActivity: recentActivityWithDetails
         }
       };
     } catch (error) {
@@ -344,7 +385,6 @@ class AuditLogService {
       const auditLogs = await AuditLog.find(query)
         .sort({ createdAt: -1 })
         .limit(10000)
-        .populate('actor', 'name email')
         .lean();
       
       return {
@@ -403,14 +443,32 @@ class AuditLogService {
       const skip = (page - 1) * limit;
       
       const [auditLogs, total] = await Promise.all([
-        AuditLog.find({ actor: this.toObjectId(adminId) })
+        AuditLog.find({ adminId: this.toObjectId(adminId) })
           .sort({ createdAt: -1 })
           .skip(skip)
           .limit(limit)
-          .populate('actor', 'name email role')
           .lean(),
-        AuditLog.countDocuments({ actor: this.toObjectId(adminId) })
+        AuditLog.countDocuments({ adminId: this.toObjectId(adminId) })
       ]);
+      
+      // Fetch actor details separately if needed
+      if (auditLogs.length > 0 && this.isReferenceField('actor')) {
+        const actorIds = auditLogs.map(log => log.actor).filter(id => id);
+        if (actorIds.length > 0) {
+          const User = mongoose.model('User');
+          const actors = await User.find({ _id: { $in: actorIds } })
+            .select('name email role')
+            .lean();
+          
+          const actorMap = new Map(actors.map(actor => [actor._id.toString(), actor]));
+          
+          auditLogs.forEach(log => {
+            if (log.actor) {
+              log.actorDetails = actorMap.get(log.actor.toString());
+            }
+          });
+        }
+      }
       
       return {
         success: true,
@@ -424,6 +482,77 @@ class AuditLogService {
       };
     } catch (error) {
       console.error('Error fetching organization activity:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * Alternative: Get audit logs with strictPopulate option disabled
+   * Use this if you want to populate even if fields aren't in schema
+   */
+  async getAuditLogsWithStrictPopulate(filters = {}, page = 1, limit = 20, userRole = null, userId = null, adminId = null) {
+    try {
+      const query = {};
+      
+      // Apply filters (same as above)
+      if (filters.action) query.action = filters.action;
+      if (filters.resource) query.resource = filters.resource;
+      if (filters.actorRole) query.actorRole = filters.actorRole;
+      if (filters.status) query.status = filters.status;
+      if (filters.resourceId) query.resourceId = this.toObjectId(filters.resourceId);
+      
+      if (filters.startDate || filters.endDate) {
+        query.createdAt = {};
+        if (filters.startDate) query.createdAt.$gte = new Date(filters.startDate);
+        if (filters.endDate) query.createdAt.$lte = new Date(filters.endDate);
+      }
+      
+      if (filters.search) {
+        query.$or = [
+          { description: { $regex: filters.search, $options: 'i' } },
+          { resourceName: { $regex: filters.search, $options: 'i' } },
+          { actorEmail: { $regex: filters.search, $options: 'i' } },
+          { referenceId: { $regex: filters.search, $options: 'i' } }
+        ];
+      }
+      
+      if (userRole === 'team') {
+        query.actor = this.toObjectId(userId);
+      } else if (userRole === 'admin') {
+        query.$or = [
+          { actor: this.toObjectId(userId) },
+          { adminId: this.toObjectId(adminId) }
+        ];
+      }
+      
+      const skip = (page - 1) * limit;
+      
+      const [auditLogs, total] = await Promise.all([
+        AuditLog.find(query)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .populate({ path: 'actor', select: 'name email role', strictPopulate: false })
+          .populate({ path: 'adminId', select: 'name email role', strictPopulate: false })
+          .lean(),
+        AuditLog.countDocuments(query)
+      ]);
+      
+      return {
+        success: true,
+        auditLogs,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit)
+        }
+      };
+    } catch (error) {
+      console.error('Error fetching audit logs:', error);
       return {
         success: false,
         error: error.message

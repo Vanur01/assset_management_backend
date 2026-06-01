@@ -38,7 +38,7 @@ class ChecklistRequestService {
         const referenceFiles = files && files.length > 0
             ? files.map(file => ({
                 originalName: file.originalname,
-                filePath: `https://assset-management-backend-4.onrender.com/uploads/checklist-requests/${file.filename}`,
+                filePath: `http://localhost:9001/uploads/checklist-requests/${file.filename}`,
                 mimeType: file.mimetype,
                 sizeBytes: file.size,
                 uploadedAt: new Date(),
