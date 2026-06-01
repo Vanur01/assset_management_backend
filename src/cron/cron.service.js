@@ -1,137 +1,147 @@
-// import cron from 'node-cron';
-// import Client from '../models/client.model.js';
-// import Auth from '../models/auth.model.js';
-// import { AppError } from '../errors/customError.js';
-// import mongoose from 'mongoose';
+import cron from 'node-cron';
+import User  from '../models/user.model.js';
+import EmailService from '../services/email.service.js';
+import NotificationService from '../services/notification.service.js';
 
-// /* ==========================================================
-//    EXPIRY CRON JOBS
-//    Runs daily at midnight to check and update expired clients
-// ========================================================== */
+class CronService {
+  constructor() {
+    this.isRunning = false;
+  }
 
-// // Schedule: 0 0 * * * (runs at midnight every day)
-// export const initExpiryCronJobs = () => {
-//     cron.schedule('0 * * * *', async () => {
-//         console.log('Running hourly critical expiry check...', new Date().toISOString());
-//         try {
-//             await checkCriticalExpirations();
-//         } catch (error) {
-//             console.error('Error in hourly expiry check:', error);
-//         }
-//     });
+  /**
+   * Initialize all cron jobs
+   */
+  init() {
+    if (this.isRunning) {
+      console.log('Cron jobs already running');
+      return;
+    }
 
-// };
+    console.log('Initializing cron jobs...');
 
-// /* ==========================================================
-//    CHECK AND UPDATE EXPIRED CLIENTS
-// ========================================================== */
-// export const checkAndUpdateExpiredClients = async () => {
-//     const session = await mongoose.startSession();
-//     session.startTransaction();
+    // Run daily at 9:00 AM
+    cron.schedule('0 9 * * *', async () => {
+      console.log('Running daily cron jobs...');
+      await this.checkInactiveUsers();
+      await this.checkExpiringSubscriptions();
+    });
 
-//     try {
-//         const now = new Date();
+    // Run every hour for subscription expiry checks
+    cron.schedule('0 * * * *', async () => {
+      console.log('Running hourly subscription expiry check...');
+      await this.checkExpiringSubscriptions();
+    });
 
-//         // Find all active clients that have expired
-//         const expiredClients = await Client.find({
-//             status: 'active',
-//             expiryDate: { $lt: now }
-//         }).session(session);
+    // Run every 6 hours for inactivity checks
+    cron.schedule('0 */6 * * *', async () => {
+      console.log('Running inactivity check...');
+      await this.checkInactiveUsers();
+    });
 
-//         if (expiredClients.length === 0) {
-//             await session.commitTransaction();
-//             session.endSession();
-//             return {
-//                 processed: 0,
-//                 updated: 0,
-//                 autoRenewed: 0,
-//                 message: 'No expired clients found'
-//             };
-//         }
+    this.isRunning = true;
+    console.log('Cron jobs initialized successfully');
+  }
 
-//         console.log(`Found ${expiredClients.length} expired clients`);
+  /**
+   * Check for inactive users (7+ days no login) and send reminders
+   */
+  async checkInactiveUsers() {
+    console.log('Checking for inactive users...');
+    
+    try {
+      const inactiveUsers = await User.getInactiveUsers(7);
+      
+      for (const user of inactiveUsers) {
+        // Check if we've already sent an email in the last 7 days
+        const lastEmailSent = user.lastInactivityEmailSent;
+        const shouldSendEmail = !lastEmailSent || 
+          (new Date() - lastEmailSent) > 7 * 24 * 60 * 60 * 1000;
+        
+        if (shouldSendEmail) {
+          console.log(`Sending inactivity reminder to ${user.email} (${user.role})`);
+          
+          // Calculate actual days inactive
+          const lastActivity = user.lastLogin || user.lastActiveAt || user.createdAt;
+          const daysInactive = Math.floor((new Date() - lastActivity) / (1000 * 60 * 60 * 24));
+          
+          // Send email
+          await EmailService.sendInactivityReminderEmail(user, daysInactive);
+          
+          // Create notification
+          await NotificationService.notifyInactivity(user, daysInactive);
+          
+          // Update last email sent time
+          user.lastInactivityEmailSent = new Date();
+          await user.save();
+        }
+      }
+      
+      console.log(`Processed ${inactiveUsers.length} inactive users`);
+    } catch (error) {
+      console.error('Error checking inactive users:', error);
+    }
+  }
 
-//         let updatedCount = 0;
-//         let autoRenewedCount = 0;
-//         const autoRenewedClients = [];
+  /**
+   * Check for expiring subscriptions and send reminders
+   * Sends reminders at 7 days and 3 days before expiry
+   */
+  async checkExpiringSubscriptions() {
+    console.log('Checking for expiring subscriptions...');
+    
+    try {
+      const expiringSubscriptions = await User.getExpiringSubscriptions();
+      
+      for (const client of expiringSubscriptions) {
+        const daysRemaining = this.calculateDaysRemaining(client.subscriptionEndDate);
+        
+        // Check if we need to send a notification for 7 days or 3 days
+        const shouldSend7Day = daysRemaining <= 7 && daysRemaining > 3 && 
+          (!client.lastExpiryNotificationSent || !client.lastExpiryNotificationSent.includes('7'));
+        
+        const shouldSend3Day = daysRemaining <= 3 && daysRemaining > 0 &&
+          (!client.lastExpiryNotificationSent || !client.lastExpiryNotificationSent.includes('3'));
+        
+        if (shouldSend7Day) {
+          console.log(`Sending 7-day expiry reminder to ${client.email}`);
+          await EmailService.sendSubscriptionExpiryEmail(client, daysRemaining);
+          await NotificationService.notifySubscriptionExpiry(client, daysRemaining);
+          
+          // Update notification tracking
+          const notifications = client.lastExpiryNotificationSent ? 
+            client.lastExpiryNotificationSent.split(',') : [];
+          notifications.push('7');
+          client.lastExpiryNotificationSent = notifications.join(',');
+          await client.save();
+        }
+        
+        if (shouldSend3Day) {
+          console.log(`Sending 3-day expiry reminder to ${client.email}`);
+          await EmailService.sendSubscriptionExpiryEmail(client, daysRemaining);
+          await NotificationService.notifySubscriptionExpiry(client, daysRemaining);
+          
+          // Update notification tracking
+          const notifications = client.lastExpiryNotificationSent ? 
+            client.lastExpiryNotificationSent.split(',') : [];
+          if (!notifications.includes('3')) {
+            notifications.push('3');
+            client.lastExpiryNotificationSent = notifications.join(',');
+            await client.save();
+          }
+        }
+      }
+      
+      console.log(`Processed ${expiringSubscriptions.length} expiring subscriptions`);
+    } catch (error) {
+      console.error('Error checking expiring subscriptions:', error);
+    }
+  }
 
-//         // Process each expired client
-//         for (const client of expiredClients) {
-//             // Check if auto-renew is enabled
-//             if (client.autoRenew) {
-//                 // Auto-renew for 30 days
-//                 const previousExpiry = client.expiryDate;
-//                 const newExpiry = new Date(previousExpiry);
-//                 newExpiry.setDate(newExpiry.getDate() + 30);
+  calculateDaysRemaining(subscriptionEndDate) {
+    if (!subscriptionEndDate) return 0;
+    const diff = subscriptionEndDate - new Date();
+    return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
+  }
+}
 
-//                 // Add to renewal history
-//                 client.renewalHistory.push({
-//                     previousExpiry,
-//                     newExpiry,
-//                     daysAdded: 30,
-//                     renewedBy: null, // System auto-renewal
-//                     renewedAt: new Date(),
-//                     isAutoRenew: true
-//                 });
-
-//                 // Update client
-//                 client.expiryDate = newExpiry;
-//                 client.duration += 30;
-//                 client.status = 'active';
-
-//                 await client.save({ session });
-
-//                 autoRenewedCount++;
-//                 autoRenewedClients.push({
-//                     id: client._id,
-//                     name: client.customerName,
-//                     email: client.email,
-//                     previousExpiry,
-//                     newExpiry
-//                 });
-
-//                 console.log(`Auto-renewed client: ${client.email} - New expiry: ${newExpiry}`);
-//             } else {
-//                 // Mark as expired
-//                 client.status = 'expired';
-//                 await client.save({ session });
-//                 updatedCount++;
-
-//                 // Deactivate associated auth user if exists
-//                 if (client.authUserId) {
-//                     await Auth.findByIdAndUpdate(
-//                         client.authUserId,
-//                         {
-//                             status: 'inactive',
-//                             token: null,
-//                             refreshToken: null
-//                         },
-//                         { session }
-//                     );
-//                 }
-
-//                 console.log(`Marked client as expired: ${client.email}`);
-//             }
-//         }
-
-//         await session.commitTransaction();
-//         session.endSession();
-
-//         // Log the results
-//         const result = {
-//             processed: expiredClients.length,
-//             updated: updatedCount,
-//             autoRenewed: autoRenewedCount,
-//             autoRenewedClients,
-//             timestamp: new Date(),
-//             message: `Processed ${expiredClients.length} expired clients: ${updatedCount} marked expired, ${autoRenewedCount} auto-renewed`
-//         };
-//         return result;
-
-//     } catch (error) {
-//         await session.abortTransaction();
-//         session.endSession();
-//         throw new AppError(`Failed to process expired clients: ${error.message}`, 500);
-//     }
-// };
-
+export default new CronService();

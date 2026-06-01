@@ -1,43 +1,28 @@
+// src/routes/asset.routes.js
 import express from 'express';
 import AssetController from '../controllers/asset.controller.js';
-import { authenticate } from '../middlewares/verifyToken.js';
-import { upload } from '../middlewares/upload.js';
+import { authenticate, allowRoles } from '../middlewares/verifyToken.js';
 
 const router = express.Router();
 
 router.use(authenticate);
 
-const setUserContext = (req, res, next) => {
-  req.userRole = req.user?.role;
-  req.userId = req.user?._id;
-  req.adminId = req.user?.adminId || req.user?._id;
-  next();
-};
+// GET routes
+router.get('/', allowRoles('admin', 'team'), AssetController.getAssetList);
+router.get('/:id', allowRoles('admin', 'team'), AssetController.getAssetById);
+router.get('/:id/clones', allowRoles('admin', 'team'), AssetController.getCloneList);
 
-router.use(setUserContext);
+// POST routes
+router.post('/add', allowRoles('admin', 'team'), AssetController.addAsset);
+router.post('/:id/clone', allowRoles('admin', 'team'), AssetController.cloneAsset);
 
-// ==================== STATIC ROUTES (must come before /:id) ====================
+// PUT routes
+router.put('/:id', allowRoles('admin', 'team'), AssetController.editAsset);
 
-// Asset list and create
-router.get('/', AssetController.getAssetList);
-router.post('/add', AssetController.addAsset);                         // Admin only
+// PATCH routes
+router.patch('/:id/status', allowRoles('admin', 'team'), AssetController.updateAssetStatus);
 
-// Asset requests
-router.post('/request', AssetController.addAssetRequest);              // Team only
-router.get('/requests/parent', AssetController.getParentAssetRequests); // Admin: all | Team: own
-router.get('/requests/child', AssetController.getChildAssetRequests);   // Admin: all | Team: own
-router.get('/requests/my', AssetController.getMyRequests);              // Team only
-router.post('/requests/:requestId/process', AssetController.processAssetRequest); // Admin only
-
-// ==================== DYNAMIC ROUTES (/:id and sub-routes) ====================
-
-router.get('/:id', AssetController.getAssetById);
-router.put('/:id', AssetController.editAsset);
-router.delete('/:id', AssetController.deleteAsset);
-router.patch('/:id/status', AssetController.updateAssetStatus);
-router.post('/:id/images', upload.single('image'), AssetController.uploadAssetImage);
-router.post('/:id/link', AssetController.linkAsset);
-router.post('/:id/clone', AssetController.cloneAsset);
-router.get('/:id/clones', AssetController.getCloneList);
+// DELETE routes (admin only)
+router.delete('/:id', allowRoles('admin'), AssetController.deleteAsset);
 
 export default router;

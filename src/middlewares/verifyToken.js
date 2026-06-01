@@ -21,6 +21,7 @@ export const authenticate = async (req, res, next) => {
     if (!decoded?._id || !decoded?.role) {
       return next(new AuthorizationError('Invalid token payload', 401));
     }
+    console.log("users....", decoded?._id)
 
     const user = await User.findById(decoded._id).lean();
 

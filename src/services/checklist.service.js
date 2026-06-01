@@ -1,73 +1,142 @@
-import Checklist from '../models/checklist.model.js';
-import ChecklistRequest from '../models/Checklistrequest.model.js';
+import Checklist, { CHECKLIST_FIELD_TYPES } from '../models/checklist.model.js';
+import ChecklistRequest    from '../models/Checklistrequest.model.js';
+import ChecklistSubmission from '../models/checklistSubmission.model.js';
 import {
   ValidationError,
   NotFoundError,
   AuthorizationError,
-  BadRequestError
+  BadRequestError,
 } from '../errors/customError.js';
 import XLSX from 'xlsx';
-import fs from 'fs';
+import fs   from 'fs';
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const VALID_IMPORT_TYPES = [
+  'text_input', 'text_area', 'dropdown', 'checkbox',
+  'rating', 'signature', 'date_picker', 'image_upload',
+  'file_upload', 'number_input', 'email_input', 'phone_input',
+];
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const PHONE_REGEX = /^[\+]?[(]?[0-9]{1,4}[)]?[-\s.]?[(]?[0-9]{1,4}[)]?[-\s.]?[0-9]{4,9}$/;
+
+// ─── ChecklistService ─────────────────────────────────────────────────────────
 
 class ChecklistService {
 
-  // ==================== HELPER METHODS ====================
+  // ==================== VALIDATION HELPERS ====================
 
+  /**
+   * Validate a single field's configuration.
+   * Returns an array of error strings (empty = valid).
+   */
   validateField(field) {
     const errors = [];
-    if (!field.label || field.label.trim().length < 1) {
+
+    if (!field.label?.trim()) {
       errors.push('Field label is required');
     }
-    if (field.fieldType === 'dropdown' && (!field.options || field.options.length === 0)) {
-      errors.push('Dropdown fields must have at least one option');
+
+    switch (field.fieldType) {
+      case 'dropdown':
+      case 'multi_select':
+        if (!field.options?.length) {
+          errors.push(`${field.fieldType} fields must have at least one option`);
+        }
+        break;
+
+      case 'checkbox':
+        if (!field.checkboxItems?.length) {
+          errors.push('Checkbox fields must have at least one item');
+        }
+        break;
+
+      case 'rating':
+        if (field.ratingMax < 1 || field.ratingMax > 10) {
+          errors.push('Rating max must be between 1 and 10');
+        }
+        break;
+
+      case 'number_input':
+      case 'slider':
+        if (
+          field.minValue !== null &&
+          field.maxValue !== null &&
+          field.minValue >= field.maxValue
+        ) {
+          errors.push('Min value must be less than max value');
+        }
+        break;
+
+      case 'text_input':
+      case 'text_area': {
+        const { minLength, maxLength } = field.validationRules ?? {};
+        if (minLength != null && minLength < 0) {
+          errors.push('Min length cannot be negative');
+        }
+        if (maxLength != null && maxLength < 0) {
+          errors.push('Max length cannot be negative');
+        }
+        if (minLength != null && maxLength != null && minLength > maxLength) {
+          errors.push('Min length cannot exceed max length');
+        }
+        break;
+      }
     }
-    if (field.fieldType === 'checkbox' && (!field.checkboxItems || field.checkboxItems.length === 0)) {
-      errors.push('Checkbox fields must have at least one item');
-    }
-    if (field.fieldType === 'rating' && (field.ratingMax < 1 || field.ratingMax > 10)) {
-      errors.push('Rating max must be between 1 and 10');
-    }
+
     return errors;
   }
 
+  /**
+   * Validate all sections & fields.
+   * Throws ValidationError on failure.
+   */
   validateSections(sections) {
     const errors = [];
-    if (!sections || sections.length === 0) {
+
+    if (!sections?.length) {
       errors.push('At least one section is required');
     }
-    sections.forEach((section, idx) => {
-      if (!section.sectionTitle || section.sectionTitle.trim() === '') {
+
+    sections?.forEach((section, idx) => {
+      if (!section.sectionTitle?.trim()) {
         errors.push(`Section ${idx + 1} must have a title`);
       }
-      if (section.fields && section.fields.length === 0) {
-        errors.push(`Section "${section.sectionTitle}" must have at least one field`);
+
+      if (!section.fields?.length) {
+        errors.push(`Section "${section.sectionTitle || idx + 1}" must have at least one field`);
       }
-      section.fields?.forEach((field, fieldIdx) => {
+
+      section.fields?.forEach((field, fIdx) => {
         const fieldErrors = this.validateField(field);
-        if (fieldErrors.length > 0) {
-          errors.push(`Section "${section.sectionTitle}", Field ${fieldIdx + 1}: ${fieldErrors.join(', ')}`);
+        if (fieldErrors.length) {
+          errors.push(
+            `Section "${section.sectionTitle}", Field ${fIdx + 1} (${field.label}): ${fieldErrors.join(', ')}`
+          );
         }
       });
     });
-    if (errors.length > 0) {
-      throw new ValidationError(errors);
-    }
+
+    if (errors.length) throw new ValidationError(errors);
   }
+
+  // ==================== QUERY BUILDERS ====================
 
   buildChecklistQuery(userId, userRole, filters = {}) {
     const query = { status: { $ne: 'deleted' } };
 
     if (userRole === 'admin') {
-      // Admin sees only their own created checklists
       query.createdBy = userId;
     }
-    // Super Admin sees all checklists (no filter)
 
-    if (filters.type) query.type = filters.type;
-    if (filters.status) query.status = filters.status;
-    if (filters.category) query.category = filters.category;
-    if (filters.search) {
-      query.$text = { $search: filters.search };
+    if (filters.type)        query.type     = filters.type;
+    if (filters.status)      query.status   = filters.status;
+    if (filters.category)    query.category = filters.category;
+    if (filters.subcategory) query.subcategory = filters.subcategory;
+    if (filters.search)      query.$text    = { $search: filters.search };
+    if (filters.isApproved !== undefined) {
+      query.isApproved = filters.isApproved === 'true' || filters.isApproved === true;
     }
 
     return query;
@@ -77,52 +146,77 @@ class ChecklistService {
     const query = {};
 
     if (userRole === 'admin') {
-      // Admin sees only their own requests
       query.requestedBy = userId;
     }
-    // Super Admin sees all requests
 
-    if (filters.status) query.status = filters.status;
+    if (filters.status)      query.status      = filters.status;
     if (filters.urgencyLevel) query.urgencyLevel = filters.urgencyLevel;
     if (filters.search) {
       query.$or = [
-        { checklistName: { $regex: filters.search, $options: 'i' } },
-        { requestedByName: { $regex: filters.search, $options: 'i' } }
+        { checklistName:    { $regex: filters.search, $options: 'i' } },
+        { requestedByName:  { $regex: filters.search, $options: 'i' } },
       ];
     }
 
     return query;
   }
 
-  // ==================== CREATE CHECKLIST ====================
+  // ==================== PAGINATION HELPER ====================
+
+  buildPagination(page, limit, total) {
+    const totalPages = Math.ceil(total / limit);
+    return {
+      page,
+      limit,
+      total,
+      totalPages,
+      hasNextPage: page < totalPages,
+      hasPrevPage: page > 1,
+    };
+  }
+
+  // ==================== CHECKLIST CRUD ====================
 
   async createChecklist(userId, userRole, data) {
-    const { name, description, category, tags, type } = data;
+    const { name, description, category, subcategory, tags, type, sections, settings } = data;
+
+    if (sections?.length) {
+      this.validateSections(sections);
+    }
+
+    const isGlobal = type === 'global';
 
     const checklist = await Checklist.create({
       name,
-      description: description || '',
-      category: category || 'General',
-      tags: tags || [],
-      type,
-      createdBy: userId,
+      description:   description   || '',
+      category:      category      || 'General',
+      subcategory:   subcategory   || '',
+      tags:          tags          || [],
+      type:          type          || 'custom',
+      sections:      sections      || [],
+      settings:      settings      || {},
+      createdBy:     userId,
       createdByRole: userRole,
-      status: "active",
-      isApproved: type === 'global' ? true : false,
-      approvedBy: type === 'global' ? userId : null,
-      approvedAt: type === 'global' ? new Date() : null,
+      status:        'active',
+      isApproved:    true,
+      approvedBy:    isGlobal ? userId    : null,
+      approvedAt:    isGlobal ? new Date() : null,
     });
+    console.log("data....", checklist)
 
-    return await checklist.populate('createdBy', 'name email role');
+    return checklist._doc;
   }
 
-  // ==================== GET CHECKLISTS (Role-based) ====================
-
   async getChecklists(userId, userRole, filters = {}) {
-    const { page = 1, limit = 20, sortBy = 'createdAt', sortOrder = 'desc' } = filters;
-    const query = this.buildChecklistQuery(userId, userRole, filters);
+    const {
+      page     = 1,
+      limit    = 20,
+      sortBy   = 'createdAt',
+      sortOrder = 'desc',
+    } = filters;
 
-    const skip = (page - 1) * limit;
+    const query       = this.buildChecklistQuery(userId, userRole, filters);
+    const skip        = (page - 1) * limit;
     const sortOptions = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
 
     const [checklists, total] = await Promise.all([
@@ -131,96 +225,54 @@ class ChecklistService {
         .populate('clonedFrom', 'name')
         .sort(sortOptions)
         .skip(skip)
-        .limit(limit)
+        .limit(Number(limit))
         .lean(),
-      Checklist.countDocuments(query)
+      Checklist.countDocuments(query),
     ]);
 
-    return {
-      checklists,
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit),
-        hasNextPage: page < Math.ceil(total / limit),
-        hasPrevPage: page > 1
-      }
-    };
+    return { checklists, pagination: this.buildPagination(Number(page), Number(limit), total) };
   }
 
   async getChecklistById(checklistId) {
     const checklist = await Checklist.findById(checklistId)
-      .populate('createdBy', 'name email role')
-      .populate('clonedFrom', 'name');
+      .populate('createdBy',  'name email role')
+      .populate('clonedFrom', 'name')
+      .populate('approvedBy', 'name email');
 
-    if (!checklist) {
-      throw new NotFoundError('Checklist not found');
-    }
+    if (!checklist) throw new NotFoundError('Checklist not found');
 
-    const requestCount = await ChecklistRequest.countDocuments({
-      createdChecklistId: checklistId
-    });
+    const [requestCount, submissionCount] = await Promise.all([
+      ChecklistRequest.countDocuments({ createdChecklistId: checklistId }),
+      ChecklistSubmission.countDocuments({ checklistId }),
+    ]);
 
-    return {
-      ...checklist.toObject(),
-      requestCount
-    };
-  }
-
-  async updateChecklist(checklistId, userId, userRole, updateData) {
-    const checklist = await Checklist.findById(checklistId);
-    if (!checklist) {
-      throw new NotFoundError('Checklist not found');
-    }
-
-    // Check permission
-    if (userRole === 'admin' && checklist.createdBy.toString() !== userId) {
-      throw new AuthorizationError('You can only update your own checklists');
-    }
-
-    if (updateData.sections) {
-      this.validateSections(updateData.sections);
-    }
-
-    const updated = await Checklist.findByIdAndUpdate(
-      checklistId,
-      { $set: updateData },
-      { new: true, runValidators: true }
-    ).populate('createdBy', 'name email role');
-
-    return updated;
+    return { ...checklist.toObject(), requestCount, submissionCount };
   }
 
   async deleteChecklist(checklistId, userId, userRole) {
     const checklist = await Checklist.findById(checklistId);
-    if (!checklist) {
-      throw new NotFoundError('Checklist not found');
-    }
+    if (!checklist) throw new NotFoundError('Checklist not found');
 
-    // Check permission
-    if (userRole === 'admin' && checklist.createdBy.toString() !== userId) {
+    if (userRole === 'admin' && checklist.createdBy.toString() !== userId.toString()) {
       throw new AuthorizationError('You can only delete your own checklists');
     }
 
-    await Checklist.findByIdAndDelete(checklistId);
+    await Checklist.findByIdAndUpdate(checklistId, { status: 'deleted' });
     return { deleted: true, id: checklistId };
   }
 
-  // ==================== CLONE CHECKLIST ====================
+  // ==================== CLONE ====================
 
   async getCloneList(userId, userRole, filters = {}) {
     const { page = 1, limit = 20, search } = filters;
-    const query = { status: 'active' };
+    const query = { status: 'active', isApproved: true };
 
     if (userRole === 'admin') {
-      // Admin can clone their own checklists AND global checklists
       query.$or = [
         { createdBy: userId, type: { $in: ['custom', 'clone'] } },
-        { type: 'global' }
+        { type: 'global' },
       ];
     }
-    // Super Admin can clone all checklists
 
     if (search) {
       query.name = { $regex: search, $options: 'i' };
@@ -233,89 +285,94 @@ class ChecklistService {
         .populate('createdBy', 'name email role')
         .sort('-createdAt')
         .skip(skip)
-        .limit(limit)
+        .limit(Number(limit))
         .lean(),
-      Checklist.countDocuments(query)
+      Checklist.countDocuments(query),
     ]);
 
-    return {
-      checklists,
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit)
-      }
-    };
+    return { checklists, pagination: this.buildPagination(Number(page), Number(limit), total) };
   }
 
-  async cloneChecklist(userId, userRole, checklistId, newName) {
+  async cloneChecklist(userId, userRole, checklistId, newName, options = {}) {
     const original = await Checklist.findById(checklistId);
-    if (!original) {
-      throw new NotFoundError('Checklist not found');
-    }
+    if (!original) throw new NotFoundError('Checklist not found');
 
-    // Check clone permission
     if (userRole === 'admin') {
-      const canClone = original.createdBy.toString() === userId || original.type === 'global';
+      const canClone =
+        original.createdBy.toString() === userId.toString() ||
+        original.type === 'global';
       if (!canClone) {
-        throw new AuthorizationError('You can only clone your own checklists or global checklists');
+        throw new AuthorizationError(
+          'You can only clone your own checklists or global checklists'
+        );
       }
     }
 
-    const cloned = await Checklist.create({
-      name: newName || `${original.name} (Clone)`,
-      description: original.description,
-      category: original.category,
-      tags: original.tags,
-      sections: JSON.parse(JSON.stringify(original.sections)),
-      type: 'clone',
-      clonedFrom: original._id,
-      createdBy: userId,
-      createdByRole: userRole,
-      status: 'active',
-      isApproved: false,
-    });
+    // Bump version: "v1.0" → "v1.1"
+    const currentVersion = parseFloat(original.version?.replace('v', '') ?? '1.0');
+    const nextVersion    = `v${(currentVersion + 0.1).toFixed(1)}`;
 
-    return await cloned;
+    const [cloned] = await Promise.all([
+      Checklist.create({
+        name:          newName || `${original.name} (Clone)`,
+        description:   original.description,
+        category:      original.category,
+        subcategory:   original.subcategory,
+        tags:          [...original.tags],
+        sections:      JSON.parse(JSON.stringify(original.sections)),
+        settings:      original.settings,
+        type:          'clone',
+        clonedFrom:    original._id,
+        createdBy:     userId,
+        createdByRole: userRole,
+        status:        'active',
+        isApproved:    false,
+        version:       nextVersion,
+      }),
+      Checklist.findByIdAndUpdate(checklistId, {
+        $inc: { usageCount: 1 },
+        lastUsedAt: new Date(),
+      }),
+    ]);
+
+    return cloned.populate('createdBy', 'name email role');
   }
 
-  // ==================== IMPORT FROM EXCEL ====================
+  // ==================== EXCEL IMPORT ====================
 
   async importFromExcel(userId, userRole, filePath, options = {}) {
     const { name, description, type = 'custom', category = 'Imported' } = options;
 
     try {
-      const workbook = XLSX.readFile(filePath);
+      const workbook  = XLSX.readFile(filePath);
       const sheetName = workbook.SheetNames[0];
-      const worksheet = workbook.Sheets[sheetName];
-      const data = XLSX.utils.sheet_to_json(worksheet);
+      const data      = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
 
-      if (!data || data.length === 0) {
-        throw new ValidationError(['Excel file is empty']);
-      }
+      if (!data?.length) throw new ValidationError(['Excel file is empty or has no data rows']);
 
       const sections = this.parseExcelToSections(data);
 
       const checklist = await Checklist.create({
-        name: name || `Imported: ${Date.now()}`,
-        description: description || 'Imported from Excel',
+        name:              name || `Imported: ${Date.now()}`,
+        description:       description || 'Imported from Excel',
         category,
         type,
-        createdBy: userId,
-        createdByRole: userRole,
+        createdBy:         userId,
+        createdByRole:     userRole,
         sections,
         importedFromExcel: true,
-        excelFileName: filePath.split('/').pop(),
-        status: 'draft',
-        isApproved: false,
+        excelFileName:     filePath.split('/').pop(),
+        status:            'active',
+        isApproved:        true,
       });
 
       return checklist;
-
     } finally {
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
+      // Always clean up temp file
+      try {
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      } catch {
+        // non-fatal
       }
     }
   }
@@ -324,60 +381,249 @@ class ChecklistService {
     const sectionsMap = new Map();
 
     data.forEach((row) => {
-      const fieldFull = this.clean(row['Section - Field Name']);
+      const fieldFull = this._clean(row['Section - Field Name']);
       if (!fieldFull) return;
 
       let sectionName = 'General';
-      let fieldName = fieldFull;
+      let fieldName   = fieldFull;
 
       if (fieldFull.includes(' - ')) {
-        const parts = fieldFull.split(' - ');
-        sectionName = parts[0].trim();
-        fieldName = parts[1].trim();
+        const [sec, ...rest] = fieldFull.split(' - ');
+        sectionName = sec.trim();
+        fieldName   = rest.join(' - ').trim();
       }
 
-      if (!sectionsMap.has(sectionName)) {
-        sectionsMap.set(sectionName, []);
-      }
+      if (!sectionsMap.has(sectionName)) sectionsMap.set(sectionName, []);
 
-      let options = [];
-      if (row['Options']) {
-        options = row['Options'].toString().split(',').map(opt => opt.trim());
-      }
+      const options = row['Options']
+        ? String(row['Options']).split(',').map(o => o.trim()).filter(Boolean)
+        : [];
 
-      const validTypes = ['text_input', 'dropdown', 'rating', 'checkbox', 'signature', 'date_picker', 'text_area'];
-      let fieldType = this.clean(row['Field Type']) || 'text_input';
-      if (!validTypes.includes(fieldType)) {
-        fieldType = 'text_input';
-      }
+      const checkboxItems = row['Checkbox Items']
+        ? String(row['Checkbox Items']).split(',').map(i => i.trim()).filter(Boolean)
+        : [];
 
-      sectionsMap.get(sectionName).push({
-        label: fieldName,
+      let fieldType = this._clean(row['Field Type']) || 'text_input';
+      if (!VALID_IMPORT_TYPES.includes(fieldType)) fieldType = 'text_input';
+
+      const fields = sectionsMap.get(sectionName);
+      fields.push({
+        label:       fieldName,
         fieldType,
-        isRequired: String(row['Required']).toLowerCase() === 'yes',
+        isRequired:  String(row['Required']).toLowerCase() === 'yes',
         options,
-        placeholder: this.clean(row['Placeholder']) || '',
-        order: sectionsMap.get(sectionName).length,
+        checkboxItems,
+        placeholder: this._clean(row['Placeholder']) || '',
+        helpText:    this._clean(row['Help Text'])    || '',
+        ratingMax:   row['Rating Max'] ? parseInt(row['Rating Max'], 10) : 5,
+        order:       fields.length,
+        validationRules: {
+          minLength: row['Min Length'] ? parseInt(row['Min Length'], 10)   : null,
+          maxLength: row['Max Length'] ? parseInt(row['Max Length'], 10)   : null,
+          minValue:  row['Min Value']  ? parseFloat(row['Min Value'])      : null,
+          maxValue:  row['Max Value']  ? parseFloat(row['Max Value'])      : null,
+        },
       });
     });
 
-    const sections = [];
-    let sectionOrder = 0;
-
-    for (const [title, fields] of sectionsMap) {
-      sections.push({
-        sectionTitle: title,
-        fields,
-        order: sectionOrder++,
-      });
-    }
-
-    return sections;
+    return [...sectionsMap.entries()].map(([sectionTitle, fields], order) => ({
+      sectionTitle,
+      fields,
+      order,
+    }));
   }
 
-  clean(value) {
-    if (!value) return '';
+  _clean(value) {
+    if (value == null) return '';
     return String(value).trim();
+  }
+
+  // ==================== SUBMISSIONS ====================
+
+  /**
+   * Validate a submitted field value against its schema definition.
+   * Returns array of error strings.
+   */
+  validateFieldValue(field, value) {
+    const errors = [];
+    const isEmpty = value === null || value === undefined ||
+      value === '' || (Array.isArray(value) && !value.length);
+
+    if (field.isRequired && isEmpty) {
+      errors.push(`${field.label} is required`);
+      return errors;
+    }
+
+    if (isEmpty) return errors;
+
+    switch (field.fieldType) {
+      case 'text_input':
+      case 'text_area': {
+        const { minLength, maxLength, pattern } = field.validationRules ?? {};
+        if (minLength && value.length < minLength) {
+          errors.push(`${field.label} must be at least ${minLength} characters`);
+        }
+        if (maxLength && value.length > maxLength) {
+          errors.push(`${field.label} must not exceed ${maxLength} characters`);
+        }
+        if (pattern && !new RegExp(pattern).test(value)) {
+          errors.push(
+            field.validationRules?.errorMessage || `${field.label} format is invalid`
+          );
+        }
+        break;
+      }
+
+      case 'number_input':
+      case 'slider': {
+        const num = Number(value);
+        if (isNaN(num)) {
+          errors.push(`${field.label} must be a number`);
+        } else {
+          if (field.minValue !== null && num < field.minValue)
+            errors.push(`${field.label} must be at least ${field.minValue}`);
+          if (field.maxValue !== null && num > field.maxValue)
+            errors.push(`${field.label} must not exceed ${field.maxValue}`);
+        }
+        break;
+      }
+
+      case 'email_input':
+        if (!EMAIL_REGEX.test(value)) {
+          errors.push(`${field.label} must be a valid email address`);
+        }
+        break;
+
+      case 'phone_input':
+        if (!PHONE_REGEX.test(value)) {
+          errors.push(`${field.label} must be a valid phone number`);
+        }
+        break;
+
+      case 'rating':
+        if (value < 1 || value > (field.ratingMax || 5)) {
+          errors.push(`${field.label} must be between 1 and ${field.ratingMax || 5}`);
+        }
+        break;
+    }
+
+    return errors;
+  }
+
+  /**
+   * Submit a filled checklist response.
+   */
+  async submitResponse(checklistId, userId, userRole, data) {
+    const { responses = [], completionTime, ipAddress, userAgent, offlineId } = data;
+
+    const checklist = await Checklist.findById(checklistId);
+    if (!checklist) throw new NotFoundError('Checklist not found');
+    if (checklist.status !== 'active') {
+      throw new BadRequestError('This checklist is not accepting submissions');
+    }
+
+    // Build a flat field map for validation
+    const fieldMap = new Map();
+    for (const section of checklist.sections) {
+      for (const field of section.fields) {
+        fieldMap.set(field._id.toString(), field);
+      }
+    }
+
+    // Validate every response
+    const validationErrors = [];
+    for (const response of responses) {
+      const field = fieldMap.get(response.fieldId?.toString());
+      if (!field) continue; // skip unknown fields silently
+      const errs = this.validateFieldValue(field, response.value);
+      validationErrors.push(...errs);
+    }
+    if (validationErrors.length) throw new ValidationError(validationErrors);
+
+    // Check all required fields are present
+    for (const [fieldId, field] of fieldMap) {
+      if (!field.isRequired) continue;
+      const provided = responses.find(r => r.fieldId?.toString() === fieldId);
+      if (!provided || provided.value === null || provided.value === undefined || provided.value === '') {
+        validationErrors.push(`${field.label} is required`);
+      }
+    }
+    if (validationErrors.length) throw new ValidationError(validationErrors);
+
+    const submission = await ChecklistSubmission.create({
+      checklistId,
+      checklistName:    checklist.name,
+      checklistVersion: checklist.version,
+      responses,
+      submittedBy:      userId,
+      submittedByRole:  userRole,
+      status:           'completed',
+      completionTime:   completionTime ?? null,
+      ipAddress:        ipAddress      ?? null,
+      userAgent:        userAgent      ?? null,
+      offlineId:        offlineId      ?? null,
+    });
+
+    return submission.populate('submittedBy', 'name email');
+  }
+
+  /**
+   * Get all submissions for a checklist (super_admin sees all; admin sees own).
+   */
+  async getSubmissions(checklistId, userId, userRole, filters = {}) {
+    const {
+      page      = 1,
+      limit     = 20,
+      status,
+      sortOrder = 'desc',
+    } = filters;
+
+    const checklist = await Checklist.findById(checklistId).lean();
+    if (!checklist) throw new NotFoundError('Checklist not found');
+
+    if (userRole === 'admin' && checklist.createdBy.toString() !== userId.toString()) {
+      throw new AuthorizationError('You can only view submissions for your own checklists');
+    }
+
+    const query = { checklistId };
+    if (status) query.status = status;
+
+    const skip = (page - 1) * limit;
+
+    const [submissions, total] = await Promise.all([
+      ChecklistSubmission.find(query)
+        .populate('submittedBy', 'name email')
+        .populate('reviewedBy',  'name email')
+        .sort({ submittedAt: sortOrder === 'desc' ? -1 : 1 })
+        .skip(skip)
+        .limit(Number(limit))
+        .lean(),
+      ChecklistSubmission.countDocuments(query),
+    ]);
+
+    return { submissions, pagination: this.buildPagination(Number(page), Number(limit), total) };
+  }
+
+  /**
+   * Get a single submission by ID.
+   */
+  async getSubmissionById(submissionId, userId, userRole) {
+    const submission = await ChecklistSubmission.findById(submissionId)
+      .populate('submittedBy', 'name email role')
+      .populate('reviewedBy',  'name email')
+      .populate('checklistId', 'name category');
+
+    if (!submission) throw new NotFoundError('Submission not found');
+
+    // Admins can only read their own submissions
+    if (
+      userRole === 'admin' &&
+      submission.submittedBy._id.toString() !== userId.toString()
+    ) {
+      throw new AuthorizationError('You do not have access to this submission');
+    }
+
+    return submission;
   }
 
   // ==================== REQUEST MANAGEMENT ====================
@@ -385,145 +631,121 @@ class ChecklistService {
   async submitRequest(userId, userRole, requestData) {
     const request = await ChecklistRequest.create({
       ...requestData,
-      requestedBy: userId,
+      requestedBy:     userId,
       requestedByRole: userRole,
-      status: 'pending',
-      requestDate: new Date(),
+      status:          'pending',
+      requestDate:     new Date(),
     });
 
-    return await request.populate('requestedBy', 'name email role');
+    return request.populate('requestedBy', 'name email role');
   }
 
   async getRequests(userId, userRole, filters = {}) {
-    console.log("userId", userId, userRole)
-    const { page = 1, limit = 20, sortBy = 'createdAt', sortOrder = 'desc' } = filters;
-    const query = this.buildRequestQuery(userId, userRole, filters);
+    const {
+      page      = 1,
+      limit     = 20,
+      sortBy    = 'createdAt',
+      sortOrder = 'desc',
+    } = filters;
 
-    const skip = (page - 1) * limit;
+    const query       = this.buildRequestQuery(userId, userRole, filters);
+    const skip        = (page - 1) * limit;
     const sortOptions = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
 
     const [requests, total] = await Promise.all([
       ChecklistRequest.find(query)
+        .populate('requestedBy', 'name email role')
         .sort(sortOptions)
         .skip(skip)
-        .limit(limit)
+        .limit(Number(limit))
         .lean(),
-      ChecklistRequest.countDocuments(query)
+      ChecklistRequest.countDocuments(query),
     ]);
 
-    return {
-      requests,
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit),
-        hasNextPage: page < Math.ceil(total / limit),
-        hasPrevPage: page > 1
-      }
-    };
+    return { requests, pagination: this.buildPagination(Number(page), Number(limit), total) };
   }
 
   async getRequestById(requestId) {
     const request = await ChecklistRequest.findById(requestId)
-      .populate('requestedBy', 'name email role')
-      .populate('reviewedBy', 'name email')
+      .populate('requestedBy',      'name email role')
+      .populate('reviewedBy',       'name email')
       .populate('createdChecklistId', 'name type status');
 
-    if (!request) {
-      throw new NotFoundError('Request not found');
-    }
-
+    if (!request) throw new NotFoundError('Request not found');
     return request;
   }
 
   async getRequestStats(userId, userRole) {
     const query = this.buildRequestQuery(userId, userRole, {});
 
-    const stats = await ChecklistRequest.aggregate([
-      { $match: query },
-      {
-        $group: {
-          _id: '$status',
-          count: { $sum: 1 }
-        }
-      }
+    const [stats, recentRequests] = await Promise.all([
+      ChecklistRequest.aggregate([
+        { $match: query },
+        { $group: { _id: '$status', count: { $sum: 1 } } },
+      ]),
+      ChecklistRequest.find(query)
+        .populate('requestedBy', 'name email')
+        .sort('-createdAt')
+        .limit(5)
+        .lean(),
     ]);
 
     const counts = {
-      pending: 0,
-      approved: 0,
-      rejected: 0,
+      pending:     0,
+      approved:    0,
+      rejected:    0,
       under_review: 0,
       in_progress: 0,
-      total: 0
+      total:       0,
     };
 
-    stats.forEach(stat => {
-      counts[stat._id] = stat.count;
-      counts.total += stat.count;
-    });
-
-    // Get recent requests
-    const recentRequests = await ChecklistRequest.find(query)
-      .populate('requestedBy', 'name email')
-      .sort('-createdAt')
-      .limit(5)
-      .lean();
+    for (const { _id, count } of stats) {
+      if (_id in counts) counts[_id] = count;
+      counts.total += count;
+    }
 
     return { counts, recentRequests };
   }
 
   async reviewRequest(requestId, userId, userRole, reviewData) {
-    const { action, rejectionReason } = reviewData;
-
-    // Only Super Admin can review requests
     if (userRole !== 'super_admin') {
-      throw new AuthorizationError(
-        'Only Super Admin can review checklist requests'
-      );
+      throw new AuthorizationError('Only Super Admin can review checklist requests');
     }
 
-    // Find request
+    const { action, rejectionReason, comments } = reviewData;
+    const VALID_ACTIONS = ['approved', 'rejected', 'under_review', 'in_progress'];
+    if (!VALID_ACTIONS.includes(action)) {
+      throw new BadRequestError(`Invalid action. Must be one of: ${VALID_ACTIONS.join(', ')}`);
+    }
+
     const request = await ChecklistRequest.findById(requestId);
+    if (!request) throw new NotFoundError('Request not found');
 
-    if (!request) {
-      throw new NotFoundError('Request not found');
-    }
+    request.status         = action;
+    request.reviewedBy     = userId;
+    request.reviewedAt     = new Date();
+    request.reviewComments = comments || '';
 
-    // Update request
-    request.status = action;
-    request.reviewedBy = userId;
-    request.reviewedAt = new Date();
-
-    // Add rejection reason
     if (action === 'rejected') {
+      if (!rejectionReason) throw new BadRequestError('Rejection reason is required');
       request.rejectionReason = rejectionReason;
     }
 
-    // Add checklist name if approved
-    if (action === 'approved') {
-      const checklist = await Checklist.findById(
-        request.createdChecklistId
-      );
-
-      if (checklist) {
-        request.createdChecklistName = checklist.name;
-      }
+    if (action === 'approved' && request.createdChecklistId) {
+      await Checklist.findByIdAndUpdate(request.createdChecklistId, {
+        isApproved: true,
+        approvedBy: userId,
+        approvedAt: new Date(),
+      });
     }
 
-    // Save request
     await request.save();
 
-    // Return populated data
-    const populatedRequest = await ChecklistRequest.findById(request._id)
-      .populate('requestedBy', 'name email')
-      .populate('reviewedBy', 'name email')
+    return ChecklistRequest.findById(request._id)
+      .populate('requestedBy',      'name email')
+      .populate('reviewedBy',       'name email')
       .populate('createdChecklistId', 'name');
-
-    return populatedRequest;
   }
-
 }
 
 export default new ChecklistService();

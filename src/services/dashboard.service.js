@@ -7,934 +7,805 @@ import ChecklistRequest from '../models/Checklistrequest.model.js';
 import mongoose from 'mongoose';
 
 class DashboardService {
-  
-  // ==================== SUPER ADMIN DASHBOARD ====================
-  
-  async getsuper_adminDashboard(filters = {}) {
-    const { dateRange = 30, startDate, endDate } = filters;
-    
-    // Date range calculation
-    const end = endDate ? new Date(endDate) : new Date();
-    const start = startDate ? new Date(startDate) : new Date();
-    if (!startDate) start.setDate(start.getDate() - dateRange);
-    
-    // Parallel queries for better performance
+
+  // ─── Main Entry Point ────────────────────────────────────────────────────────
+
+  /**
+   * Single entry point — returns role-specific dashboard data.
+   * @param {string} role        - 'super_admin' | 'admin' | 'team'
+   * @param {string} userId      - The authenticated user's _id
+   * @param {object} filters     - { dateRange, startDate, endDate }
+   */
+  async getDashboard(role, userId, filters = {}) {
+    try {
+      const { start, end } = this._resolveDateRange(filters);
+
+      if (role === 'super_admin') {
+        return await this._superAdminDashboard(start, end);
+      }
+
+      if (role === 'admin') {
+        if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+          throw new Error('Valid admin ID is required');
+        }
+        return await this._adminDashboard(userId, start, end);
+      }
+
+      if (role === 'team') {
+        if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+          throw new Error('Valid team member ID is required');
+        }
+        return await this._teamDashboard(userId);
+      }
+
+      throw new Error(`Unknown role: ${role}`);
+    } catch (error) {
+      console.error(`[DashboardService] getDashboard error (role=${role}):`, error);
+      return { success: false, error: error.message, data: null };
+    }
+  }
+
+  // ─── Super Admin Dashboard ────────────────────────────────────────────────────
+
+  async _superAdminDashboard(start, end) {
     const [
       clientStats,
-      subscriptionStats,
       checklistStats,
+      assignmentStats,
       requestStats,
+      revenueStats,
       recentActivities,
-      revenueData,
-      clientGrowthData,
-      topPerformers
     ] = await Promise.all([
-      this.getClientStatistics(start, end),
-      this.getSubscriptionAnalytics(start, end),
-      this.getChecklistStatistics(start, end),
-      this.getRequestStatistics(start, end),
-      this.getRecentActivities(start, end, 10),
-      this.getRevenueData(start, end),
-      this.getClientGrowthData(start, end),
-      this.getTopPerformingClients(5)
+      this._getClientStats(start, end),
+      this._getSuperAdminChecklistStats(start, end),
+      this._getSuperAdminAssignmentStats(start, end),
+      this._getRequestStats(start, end),
+      this._getRevenueStats(),
+      this._getSuperAdminActivities(start, end),
     ]);
-    
-    // Calculate growth percentages
-    const previousPeriodStart = new Date(start);
-    previousPeriodStart.setDate(previousPeriodStart.getDate() - (end - start) / (1000 * 60 * 60 * 24));
-    const previousClientCount = await User.countDocuments({
-      role: 'admin',
-      isDeleted: false,
-      createdAt: { $lt: start, $gte: previousPeriodStart }
-    });
-    
-    const clientGrowth = previousClientCount > 0 
-      ? ((clientStats.total - previousClientCount) / previousClientCount * 100).toFixed(1)
-      : 0;
-    
+
     return {
-      overview: {
-        totalClients: clientStats.total,
-        activeClients: clientStats.active,
-        inactiveClients: clientStats.inactive,
-        expiringSoon: clientStats.expiringSoon,
-        clientGrowth: parseFloat(clientGrowth),
-        totalRevenue: revenueData.totalRevenue,
-        monthlyRecurringRevenue: revenueData.mrr,
-        averageRevenuePerClient: clientStats.total > 0 ? Math.round(revenueData.totalRevenue / clientStats.total) : 0
+      success: true,
+      role: 'super_admin',
+      data: {
+        // ── Clients ──────────────────────────────────────────────────────────
+        clients: {
+          total:          clientStats.total,
+          active:         clientStats.active,
+          inactive:       clientStats.inactive,
+          expiringSoon:   clientStats.expiringSoon,
+          newThisPeriod:  clientStats.newThisPeriod,
+          byPlan:         clientStats.byPlan,
+        },
+
+        // ── Revenue ───────────────────────────────────────────────────────────
+        revenue: {
+          monthlyRecurring: revenueStats.mrr,
+          annualEstimate:   revenueStats.annual,
+          avgPerClient:     revenueStats.avgPerClient,
+          byPlan:           revenueStats.byPlan,
+        },
+
+        // ── Checklists ────────────────────────────────────────────────────────
+        checklists: {
+          total:         checklistStats.total,
+          active:        checklistStats.active,
+          global:        checklistStats.global,
+          custom:        checklistStats.custom,
+          newThisPeriod: checklistStats.newThisPeriod,
+        },
+
+        // ── Assignments / Inspections ─────────────────────────────────────────
+        assignments: {
+          total:               assignmentStats.total,
+          completed:           assignmentStats.completed,
+          pending:             assignmentStats.pending,
+          overdue:             assignmentStats.overdue,
+          pendingReview:       assignmentStats.pendingReview,
+          avgCompletionRate:   assignmentStats.avgCompletionRate,
+          approvalRate:        assignmentStats.approvalRate,
+        },
+
+        // ── Checklist Requests ────────────────────────────────────────────────
+        requests: {
+          total:                requestStats.total,
+          pending:              requestStats.pending,
+          approved:             requestStats.approved,
+          rejected:             requestStats.rejected,
+          approvalRate:         requestStats.approvalRate,
+          avgReviewTimeHours:   requestStats.avgReviewTimeHours,
+          byUrgency:            requestStats.byUrgency,
+        },
+
+        // ── Recent Activity ───────────────────────────────────────────────────
+        recentActivities,
       },
-      subscriptionAnalytics: subscriptionStats,
-      checklistAnalytics: checklistStats,
-      requestAnalytics: requestStats,
-      recentActivities,
-      charts: {
-        revenueTrend: revenueData.trend,
-        clientGrowth: clientGrowthData,
-        subscriptionDistribution: subscriptionStats.byPlan,
-        topPerformers
-      }
     };
   }
-  
-  async getClientStatistics(start, end) {
-    const stats = await User.aggregate([
-      { $match: { role: 'admin', isDeleted: false } },
-      {
-        $facet: {
-          total: [{ $count: 'count' }],
-          active: [{ $match: { status: 'active' } }, { $count: 'count' }],
-          inactive: [{ $match: { status: 'inactive' } }, { $count: 'count' }],
-          expiringSoon: [
-            { $match: { subscriptionEndDate: { $lte: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), $gt: new Date() } } },
-            { $count: 'count' }
-          ],
-          newClients: [
-            { $match: { createdAt: { $gte: start, $lte: end } } },
-            { $count: 'count' }
-          ],
-          byPlan: [
-            { $group: { _id: '$membershipPlan', count: { $sum: 1 } } }
-          ]
-        }
-      }
-    ]);
-    
-    return {
-      total: stats[0]?.total[0]?.count || 0,
-      active: stats[0]?.active[0]?.count || 0,
-      inactive: stats[0]?.inactive[0]?.count || 0,
-      expiringSoon: stats[0]?.expiringSoon[0]?.count || 0,
-      newClients: stats[0]?.newClients[0]?.count || 0,
-      byPlan: stats[0]?.byPlan?.reduce((acc, { _id, count }) => {
-        acc[_id || 'free'] = count;
-        return acc;
-      }, { free: 0, standard: 0, premium: 0, enterprise: 0 })
-    };
-  }
-  
-  async getSubscriptionAnalytics(start, end) {
-    const subscriptions = await User.aggregate([
-      { $match: { role: 'admin', isDeleted: false, subscriptionEndDate: { $ne: null } } },
-      {
-        $group: {
-          _id: null,
-          averageSubscriptionDays: { $avg: { $subtract: ['$subscriptionEndDate', '$subscriptionStartDate'] } },
-          totalActiveSubscriptions: { $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] } },
-          expiringIn30Days: {
-            $sum: {
-              $cond: [
-                {
-                  $and: [
-                    { $gt: ['$subscriptionEndDate', new Date()] },
-                    { $lte: ['$subscriptionEndDate', new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)] }
-                  ]
-                }, 1, 0
-              ]
-            }
-          },
-          expiredSubscriptions: {
-            $sum: {
-              $cond: [{ $lt: ['$subscriptionEndDate', new Date()] }, 1, 0]
-            }
-          }
-        }
-      }
-    ]);
-    
-    const revenueByPlan = await User.aggregate([
-      { $match: { role: 'admin', isDeleted: false, membershipPlan: { $ne: null } } },
-      {
-        $group: {
-          _id: '$membershipPlan',
-          count: { $sum: 1 },
-          totalLicenses: { $sum: '$licenseLimit' },
-          usedLicenses: { $sum: '$usersUsed' }
-        }
-      }
-    ]);
-    
-    const planPricing = { free: 0, standard: 49, premium: 99, enterprise: 299 };
-    
-    return {
-      averageSubscriptionDays: Math.round((subscriptions[0]?.averageSubscriptionDays || 0) / (1000 * 60 * 60 * 24)),
-      totalActiveSubscriptions: subscriptions[0]?.totalActiveSubscriptions || 0,
-      expiringIn30Days: subscriptions[0]?.expiringIn30Days || 0,
-      expiredSubscriptions: subscriptions[0]?.expiredSubscriptions || 0,
-      byPlan: revenueByPlan.map(plan => ({
-        plan: plan._id,
-        count: plan.count,
-        totalLicenses: plan.totalLicenses,
-        usedLicenses: plan.usedLicenses,
-        utilizationRate: plan.totalLicenses > 0 ? Math.round((plan.usedLicenses / plan.totalLicenses) * 100) : 0,
-        potentialRevenue: plan.count * (planPricing[plan._id] || 0)
-      }))
-    };
-  }
-  
-  async getChecklistStatistics(start, end) {
-    const stats = await Checklist.aggregate([
-      {
-        $facet: {
-          total: [{ $count: 'count' }],
-          byType: [
-            { $group: { _id: '$type', count: { $sum: 1 } } }
-          ],
-          byStatus: [
-            { $group: { _id: '$status', count: { $sum: 1 } } }
-          ],
-          newChecklists: [
-            { $match: { createdAt: { $gte: start, $lte: end } } },
-            { $count: 'count' }
-          ],
-          totalFields: [
-            { $group: { _id: null, total: { $sum: '$totalFields' } } }
-          ]
-        }
-      }
-    ]);
-    
-    const assignments = await Assignment.aggregate([
-      {
-        $facet: {
-          totalAssignments: [{ $count: 'count' }],
-          completedAssignments: [{ $match: { status: 'completed' } }, { $count: 'count' }],
-          pendingReview: [{ $match: { submissionStatus: 'pending_review' } }, { $count: 'count' }],
-          averageCompletionRate: [
-            { $group: { _id: null, avg: { $avg: '$completionRate' } } }
-          ]
-        }
-      }
-    ]);
-    
-    return {
-      total: stats[0]?.total[0]?.count || 0,
-      byType: stats[0]?.byType?.reduce((acc, { _id, count }) => ({ ...acc, [_id]: count }), {}),
-      byStatus: stats[0]?.byStatus?.reduce((acc, { _id, count }) => ({ ...acc, [_id]: count }), {}),
-      newThisPeriod: stats[0]?.newChecklists[0]?.count || 0,
-      totalFields: stats[0]?.totalFields[0]?.total || 0,
-      assignments: {
-        total: assignments[0]?.totalAssignments[0]?.count || 0,
-        completed: assignments[0]?.completedAssignments[0]?.count || 0,
-        pendingReview: assignments[0]?.pendingReview[0]?.count || 0,
-        averageCompletionRate: Math.round(assignments[0]?.averageCompletionRate[0]?.avg || 0)
-      }
-    };
-  }
-  
-  async getRequestStatistics(start, end) {
-    const stats = await ChecklistRequest.aggregate([
-      {
-        $match: { createdAt: { $gte: start, $lte: end } }
-      },
-      {
-        $facet: {
-          total: [{ $count: 'count' }],
-          byStatus: [
-            { $group: { _id: '$status', count: { $sum: 1 } } }
-          ],
-          byUrgency: [
-            { $group: { _id: '$urgencyLevel', count: { $sum: 1 } } }
-          ],
-          averageReviewTime: [
-            { $match: { timeToReview: { $ne: null } } },
-            { $group: { _id: null, avg: { $avg: '$timeToReview' } } }
-          ],
-          approved: [{ $match: { status: 'approved' } }, { $count: 'count' }],
-          rejected: [{ $match: { status: 'rejected' } }, { $count: 'count' }]
-        }
-      }
-    ]);
-    
-    return {
-      total: stats[0]?.total[0]?.count || 0,
-      byStatus: stats[0]?.byStatus?.reduce((acc, { _id, count }) => ({ ...acc, [_id]: count }), {}),
-      byUrgency: stats[0]?.byUrgency?.reduce((acc, { _id, count }) => ({ ...acc, [_id]: count }), {}),
-      averageReviewTimeHours: Math.round(stats[0]?.averageReviewTime[0]?.avg || 0),
-      approved: stats[0]?.approved[0]?.count || 0,
-      rejected: stats[0]?.rejected[0]?.count || 0,
-      approvalRate: stats[0]?.total[0]?.count > 0 
-        ? Math.round(((stats[0]?.approved[0]?.count || 0) / stats[0]?.total[0]?.count) * 100)
-        : 0
-    };
-  }
-  
-  async getRevenueData(start, end) {
-    // Calculate revenue based on active subscriptions
-    const clients = await User.find({
-      role: 'admin',
-      isDeleted: false,
-      status: 'active',
-      membershipPlan: { $ne: null, $ne: 'free' }
-    }).lean();
-    
-    const planPricing = { standard: 49, premium: 99, enterprise: 299 };
-    const monthlyRevenue = clients.reduce((total, client) => {
-      return total + (planPricing[client.membershipPlan] || 0);
-    }, 0);
-    
-    // Generate trend data for last 12 months
-    const trend = [];
-    for (let i = 11; i >= 0; i--) {
-      const monthDate = new Date();
-      monthDate.setMonth(monthDate.getMonth() - i);
-      const month = monthDate.toLocaleString('default', { month: 'short' });
-      
-      // Simulate or calculate actual revenue for each month
-      const monthRevenue = monthlyRevenue * (1 + (Math.random() - 0.5) * 0.2);
-      trend.push({ month, revenue: Math.round(monthRevenue) });
-    }
-    
-    return {
-      totalRevenue: monthlyRevenue * 12, // Annual projection
-      mrr: monthlyRevenue,
-      trend
-    };
-  }
-  
-  async getClientGrowthData(start, end) {
-    const growthData = await User.aggregate([
-      {
-        $match: {
-          role: 'admin',
-          isDeleted: false,
-          createdAt: { $gte: start, $lte: end }
-        }
-      },
-      {
-        $group: {
-          _id: {
-            year: { $year: '$createdAt' },
-            month: { $month: '$createdAt' },
-            day: { $dayOfMonth: '$createdAt' }
-          },
-          count: { $sum: 1 },
-          date: { $first: '$createdAt' }
-        }
-      },
-      { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } }
-    ]);
-    
-    // Format for chart
-    const labels = [];
-    const data = [];
-    let cumulative = 0;
-    
-    growthData.forEach(item => {
-      const date = new Date(item.date);
-      const label = `${date.getMonth() + 1}/${date.getDate()}`;
-      cumulative += item.count;
-      labels.push(label);
-      data.push(cumulative);
-    });
-    
-    return { labels, data };
-  }
-  
-  async getTopPerformingClients(limit = 5) {
-    const clients = await User.aggregate([
-      { $match: { role: 'admin', isDeleted: false, status: 'active' } },
-      {
-        $lookup: {
-          from: 'assignments',
-          localField: '_id',
-          foreignField: 'assignedBy',
-          as: 'assignments'
-        }
-      },
-      {
-        $addFields: {
-          totalAssignments: { $size: '$assignments' },
-          completedAssignments: {
-            $size: {
-              $filter: {
-                input: '$assignments',
-                cond: { $eq: ['$$this.status', 'completed'] }
-              }
-            }
-          }
-        }
-      },
-      {
-        $project: {
-          customerName: 1,
-          email: 1,
-          membershipPlan: 1,
-          totalAssignments: 1,
-          completedAssignments: 1,
-          completionRate: {
-            $cond: [
-              { $eq: ['$totalAssignments', 0] },
-              0,
-              { $multiply: [{ $divide: ['$completedAssignments', '$totalAssignments'] }, 100] }
-            ]
-          }
-        }
-      },
-      { $sort: { completionRate: -1 } },
-      { $limit: limit }
-    ]);
-    
-    return clients;
-  }
-  
-  async getRecentActivities(start, end, limit = 10) {
-    const [
-      newClients,
-      newChecklists,
-      newRequests,
-      completedInspections
-    ] = await Promise.all([
-      User.find({
-        role: 'admin',
-        isDeleted: false,
-        createdAt: { $gte: start, $lte: end }
-      }).select('customerName email createdAt').limit(limit).lean(),
-      Checklist.find({
-        createdAt: { $gte: start, $lte: end }
-      }).select('name type createdBy createdAt').populate('createdBy', 'name email').limit(limit).lean(),
-      ChecklistRequest.find({
-        createdAt: { $gte: start, $lte: end }
-      }).select('checklistName requestedByName status createdAt').limit(limit).lean(),
-      Assignment.find({
-        completedAt: { $gte: start, $lte: end },
-        status: 'completed'
-      }).select('checklist primaryMember completedAt').populate('checklist', 'name').populate('primaryMember', 'name').limit(limit).lean()
-    ]);
-    
-    // Combine and sort activities
-    const activities = [];
-    
-    newClients.forEach(c => activities.push({
-      type: 'client_created',
-      title: `New client registered: ${c.customerName}`,
-      details: c.email,
-      timestamp: c.createdAt,
-      icon: '🏢'
-    }));
-    
-    newChecklists.forEach(c => activities.push({
-      type: 'checklist_created',
-      title: `New checklist created: ${c.name}`,
-      details: `Type: ${c.type}`,
-      timestamp: c.createdAt,
-      icon: '📋'
-    }));
-    
-    newRequests.forEach(r => activities.push({
-      type: 'request_submitted',
-      title: `Checklist request: ${r.checklistName}`,
-      details: `Status: ${r.status}`,
-      timestamp: r.createdAt,
-      icon: '📝'
-    }));
-    
-    completedInspections.forEach(i => activities.push({
-      type: 'inspection_completed',
-      title: `Inspection completed: ${i.checklist?.name}`,
-      details: `By: ${i.primaryMember?.name}`,
-      timestamp: i.completedAt,
-      icon: '✅'
-    }));
-    
-    return activities.sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
-  }
-  
-  // ==================== ADMIN DASHBOARD ====================
-  
-  async getAdminDashboard(adminId, filters = {}) {
-    const { dateRange = 30, startDate, endDate } = filters;
-    
-    const end = endDate ? new Date(endDate) : new Date();
-    const start = startDate ? new Date(startDate) : new Date();
-    if (!startDate) start.setDate(start.getDate() - dateRange);
-    
+
+  // ─── Admin Dashboard ──────────────────────────────────────────────────────────
+
+  async _adminDashboard(adminId, start, end) {
+    const adminObjId = new mongoose.Types.ObjectId(adminId);
+
     const [
       teamStats,
       assetStats,
       checklistStats,
       inspectionStats,
       recentActivities,
-      performanceData,
-      upcomingTasks
     ] = await Promise.all([
-      this.getTeamStatistics(adminId),
-      this.getAssetStatistics(adminId),
-      this.getAdminChecklistStatistics(adminId, start, end),
-      this.getInspectionStatistics(adminId, start, end),
-      this.getAdminRecentActivities(adminId, start, end, 10),
-      this.getTeamPerformanceData(adminId, start, end),
-      this.getUpcomingTasks(adminId, 10)
+      this._getTeamStats(adminObjId, start, end),
+      this._getAssetStats(adminObjId),
+      this._getAdminChecklistStats(adminId, start, end),
+      this._getInspectionStats(adminId, start, end),
+      this._getAdminActivities(adminId, start, end),
     ]);
-    
-    // Get subscription info
-    const admin = await User.findById(adminId).lean();
-    
+
     return {
-      overview: {
-        totalTeamMembers: teamStats.total,
-        activeTeamMembers: teamStats.active,
-        totalAssets: assetStats.total,
-        activeAssets: assetStats.active,
-        totalChecklists: checklistStats.total,
-        totalInspections: inspectionStats.total,
-        pendingReviews: inspectionStats.pendingReview,
-        averageCompletionRate: inspectionStats.averageCompletionRate
+      success: true,
+      role: 'admin',
+      data: {
+        // ── Team Members ──────────────────────────────────────────────────────
+        team: {
+          total:             teamStats.total,
+          active:            teamStats.active,
+          inactive:          teamStats.inactive,
+          onLeave:           teamStats.onLeave,
+          byRole:            teamStats.byRole,
+          avgPerformance:    teamStats.avgPerformance,
+          completionRate:    teamStats.completionRate,
+          topPerformers:     teamStats.topPerformers,
+        },
+
+        // ── Assets ────────────────────────────────────────────────────────────
+        assets: {
+          total:             assetStats.total,
+          active:            assetStats.active,
+          inMaintenance:     assetStats.maintenance,
+          retired:           assetStats.retired,
+          byCategory:        assetStats.byCategory,
+          byCondition:       assetStats.byCondition,
+          avgHealthScore:    assetStats.avgHealthScore,
+        },
+
+        // ── Checklists ────────────────────────────────────────────────────────
+        checklists: {
+          total:             checklistStats.total,
+          newThisPeriod:     checklistStats.newThisPeriod,
+          byType:            checklistStats.byType,
+          totalAssignments:  checklistStats.totalAssignments,
+          avgCompletionRate: checklistStats.avgCompletionRate,
+        },
+
+        // ── Inspections ───────────────────────────────────────────────────────
+        inspections: {
+          total:             inspectionStats.total,
+          completed:         inspectionStats.completed,
+          pending:           inspectionStats.pending,
+          overdue:           inspectionStats.overdue,
+          approved:          inspectionStats.approved,
+          rejected:          inspectionStats.rejected,
+          pendingReview:     inspectionStats.pendingReview,
+          avgCompletionRate: inspectionStats.avgCompletionRate,
+          approvalRate:      inspectionStats.approvalRate,
+          dailyTrend:        inspectionStats.dailyTrend,
+        },
+
+        // ── Recent Activity ───────────────────────────────────────────────────
+        recentActivities,
       },
-      teamAnalytics: {
-        ...teamStats,
-        performanceTrend: performanceData.trend,
-        topPerformers: performanceData.topPerformers
-      },
-      assetAnalytics: assetStats,
-      checklistAnalytics: checklistStats,
-      inspectionAnalytics: inspectionStats,
-      subscription: {
-        plan: admin?.membershipPlan,
-        daysRemaining: admin?.daysRemaining,
-        usagePercentage: admin?.usagePercentage,
-        licenseLimit: admin?.licenseLimit,
-        licensesUsed: admin?.usersUsed,
-        licensesRemaining: (admin?.licenseLimit || 0) - (admin?.usersUsed || 0)
-      },
-      recentActivities,
-      upcomingTasks,
-      charts: {
-        inspectionTrend: inspectionStats.trend,
-        assetDistribution: assetStats.byCategory,
-        teamPerformance: performanceData.distribution
-      }
     };
   }
-  
-  async getTeamStatistics(adminId) {
-    const stats = await User.aggregate([
-      { $match: { adminId: new mongoose.Types.ObjectId(adminId), role: 'team', isDeleted: false } },
-      {
-        $facet: {
-          total: [{ $count: 'count' }],
-          active: [{ $match: { status: 'active' } }, { $count: 'count' }],
-          onLeave: [{ $match: { status: 'on_leave' } }, { $count: 'count' }],
-          byRole: [{ $group: { _id: '$teamRole', count: { $sum: 1 } } }],
-          averagePerformance: [
-            { $match: { performanceScore: { $gt: 0 } } },
-            { $group: { _id: null, avg: { $avg: '$performanceScore' } } }
-          ],
-          totalAssigned: [{ $group: { _id: null, total: { $sum: '$assignedCount' } } }],
-          totalCompleted: [{ $group: { _id: null, total: { $sum: '$completedCount' } } }]
-        }
-      }
-    ]);
-    
-    const totalAssigned = stats[0]?.totalAssigned[0]?.total || 0;
-    const totalCompleted = stats[0]?.totalCompleted[0]?.total || 0;
-    
-    return {
-      total: stats[0]?.total[0]?.count || 0,
-      active: stats[0]?.active[0]?.count || 0,
-      onLeave: stats[0]?.onLeave[0]?.count || 0,
-      byRole: stats[0]?.byRole?.reduce((acc, { _id, count }) => ({ ...acc, [_id]: count }), {}),
-      averagePerformance: Math.round(stats[0]?.averagePerformance[0]?.avg || 0),
-      completionRate: totalAssigned > 0 ? Math.round((totalCompleted / totalAssigned) * 100) : 0,
-      totalAssigned,
-      totalCompleted
-    };
-  }
-  
-  async getAssetStatistics(adminId) {
-    const stats = await Asset.aggregate([
-      { $match: { adminId: new mongoose.Types.ObjectId(adminId), isDeleted: false } },
-      {
-        $facet: {
-          total: [{ $count: 'count' }],
-          active: [{ $match: { status: 'Active' } }, { $count: 'count' }],
-          maintenance: [{ $match: { status: 'In Maintenance' } }, { $count: 'count' }],
-          retired: [{ $match: { status: 'Retired' } }, { $count: 'count' }],
-          byCategory: [{ $group: { _id: '$assetCategory', count: { $sum: 1 } } }],
-          byCondition: [{ $group: { _id: '$assetCondition', count: { $sum: 1 } } }],
-          averageHealthScore: [{ $group: { _id: null, avg: { $avg: '$healthScore' } } }]
-        }
-      }
-    ]);
-    
-    return {
-      total: stats[0]?.total[0]?.count || 0,
-      active: stats[0]?.active[0]?.count || 0,
-      maintenance: stats[0]?.maintenance[0]?.count || 0,
-      retired: stats[0]?.retired[0]?.count || 0,
-      byCategory: stats[0]?.byCategory?.reduce((acc, { _id, count }) => ({ ...acc, [_id]: count }), {}),
-      byCondition: stats[0]?.byCondition?.reduce((acc, { _id, count }) => ({ ...acc, [_id]: count }), {}),
-      averageHealthScore: Math.round(stats[0]?.averageHealthScore[0]?.avg || 0)
-    };
-  }
-  
-  async getAdminChecklistStatistics(adminId, start, end) {
-    // Get checklists created by admin
-    const checklists = await Checklist.find({
-      createdBy: adminId,
-      createdAt: { $gte: start, $lte: end }
-    });
-    
-    // Get assignments for these checklists
-    const checklistIds = checklists.map(c => c._id);
+
+  // ─── Team Dashboard ───────────────────────────────────────────────────────────
+
+  async _teamDashboard(memberId) {
+    const member = await User.findById(memberId).lean();
+    if (!member) throw new Error('Team member not found');
+
     const assignments = await Assignment.find({
-      checklist: { $in: checklistIds }
-    });
-    
-    return {
-      total: checklists.length,
-      byType: checklists.reduce((acc, c) => {
-        acc[c.type] = (acc[c.type] || 0) + 1;
-        return acc;
-      }, {}),
-      totalAssignments: assignments.length,
-      completedAssignments: assignments.filter(a => a.status === 'completed').length,
-      averageCompletionRate: assignments.length > 0
-        ? Math.round(assignments.reduce((sum, a) => sum + (a.completionRate || 0), 0) / assignments.length)
-        : 0
-    };
-  }
-  
-  async getInspectionStatistics(adminId, start, end) {
-    const assignments = await Assignment.find({
-      assignedBy: adminId,
-      submittedAt: { $gte: start, $lte: end }
-    });
-    
-    const completed = assignments.filter(a => a.status === 'completed');
-    const approved = assignments.filter(a => a.submissionStatus === 'approved');
-    const rejected = assignments.filter(a => a.submissionStatus === 'rejected');
-    const pendingReview = assignments.filter(a => a.submissionStatus === 'pending_review');
-    
-    // Generate trend data
-    const trend = [];
-    const daysDiff = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
-    for (let i = 0; i <= daysDiff; i++) {
-      const date = new Date(start);
-      date.setDate(date.getDate() + i);
-      const dateStr = date.toISOString().split('T')[0];
-      const dayAssignments = assignments.filter(a => 
-        a.submittedAt && a.submittedAt.toISOString().split('T')[0] === dateStr
-      );
-      trend.push({
-        date: dateStr,
-        count: dayAssignments.length,
-        approved: dayAssignments.filter(a => a.submissionStatus === 'approved').length,
-        rejected: dayAssignments.filter(a => a.submissionStatus === 'rejected').length
+      'assignedToTeamMembers.userId': new mongoose.Types.ObjectId(memberId),
+      isDeleted: { $ne: true },
+    })
+      .populate('checklist', 'name type category')
+      .populate('assets.assetId', 'assetName assetId')
+      .sort({ dueDate: 1 })
+      .lean();
+
+    const now = new Date();
+
+    // Status buckets
+    const completed  = assignments.filter(a => ['completed', 'approved'].includes(a.status));
+    const inProgress = assignments.filter(a => a.status === 'in_progress');
+    const pending    = assignments.filter(a => a.status === 'pending');
+    const overdue    = assignments.filter(a =>
+      a.dueDate && new Date(a.dueDate) < now && !['completed', 'approved', 'rejected'].includes(a.status)
+    );
+
+    const completionRate = assignments.length > 0
+      ? Math.round((completed.length / assignments.length) * 100)
+      : 0;
+
+    const onTime = completed.filter(a =>
+      a.submittedAt && a.dueDate && new Date(a.submittedAt) <= new Date(a.dueDate)
+    );
+    const onTimeRate = completed.length > 0
+      ? Math.round((onTime.length / completed.length) * 100)
+      : 0;
+
+    const avgScore = completed.length > 0
+      ? Math.round(completed.reduce((s, a) => s + (a.completionRate || 0), 0) / completed.length)
+      : 0;
+
+    // Upcoming (next 5 non-completed with due date)
+    const upcomingTasks = assignments
+      .filter(a => !['completed', 'approved', 'rejected'].includes(a.status) && a.dueDate)
+      .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))
+      .slice(0, 5)
+      .map(a => ({
+        id:            a._id,
+        checklistName: a.checklist?.name || a.checklistName,
+        assetName:     a.assets?.[0]?.assetName,
+        dueDate:       a.dueDate,
+        daysRemaining: Math.ceil((new Date(a.dueDate) - now) / 864e5),
+        priority:      a.priority,
+        status:        a.status,
+      }));
+
+    // Recent activity (last 10 submitted/completed)
+    const recentActivities = [...assignments]
+      .sort((a, b) => (b.submittedAt || b.updatedAt) - (a.submittedAt || a.updatedAt))
+      .slice(0, 10)
+      .map(a => ({
+        id:            a._id,
+        checklistName: a.checklist?.name || a.checklistName,
+        assetName:     a.assets?.[0]?.assetName,
+        status:        a.status,
+        completionRate: a.completionRate,
+        date:          a.submittedAt || a.updatedAt,
+      }));
+
+    // 7-day trend
+    const weeklyTrend = Array.from({ length: 7 }, (_, i) => {
+      const day = new Date();
+      day.setDate(day.getDate() - (6 - i));
+      day.setHours(0, 0, 0, 0);
+      const nextDay = new Date(day);
+      nextDay.setDate(nextDay.getDate() + 1);
+
+      const dayItems = assignments.filter(a => {
+        const ts = a.submittedAt || a.updatedAt;
+        return ts && new Date(ts) >= day && new Date(ts) < nextDay;
       });
-    }
-    
-    return {
-      total: assignments.length,
-      completed: completed.length,
-      approved: approved.length,
-      rejected: rejected.length,
-      pendingReview: pendingReview.length,
-      averageCompletionRate: completed.length > 0
-        ? Math.round(completed.reduce((sum, a) => sum + (a.completionRate || 0), 0) / completed.length)
-        : 0,
-      approvalRate: assignments.length > 0 ? Math.round((approved.length / assignments.length) * 100) : 0,
-      trend
-    };
-  }
-  
-  async getTeamPerformanceData(adminId, start, end) {
-    const teamMembers = await User.find({ adminId, role: 'team', isDeleted: false });
-    
-    // Get assignments for each team member
-    const memberIds = teamMembers.map(m => m._id);
-    const assignments = await Assignment.find({
-      primaryMember: { $in: memberIds },
-      submittedAt: { $gte: start, $lte: end }
-    });
-    
-    // Calculate performance per member
-    const memberPerformance = teamMembers.map(member => {
-      const memberAssignments = assignments.filter(a => a.primaryMember.toString() === member._id.toString());
-      const completed = memberAssignments.filter(a => a.status === 'completed');
-      const onTime = completed.filter(a => a.submittedAt && a.dueDate && a.submittedAt <= a.dueDate);
-      
+
       return {
-        name: member.fullName,
-        initials: member.initials,
-        role: member.teamRole,
-        total: memberAssignments.length,
-        completed: completed.length,
-        onTime: onTime.length,
-        onTimeRate: completed.length > 0 ? Math.round((onTime.length / completed.length) * 100) : 0,
-        averageScore: completed.length > 0
-          ? Math.round(completed.reduce((sum, a) => sum + (a.completionRate || 0), 0) / completed.length)
-          : 0
+        date:      day.toLocaleDateString(),
+        completed: dayItems.filter(a => ['completed', 'approved'].includes(a.status)).length,
+        pending:   dayItems.filter(a => !['completed', 'approved'].includes(a.status)).length,
       };
     });
-    
-    // Generate trend data
-    const trend = [];
-    const daysDiff = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
-    for (let i = 0; i <= daysDiff; i++) {
-      const date = new Date(start);
-      date.setDate(date.getDate() + i);
-      const dateStr = date.toISOString().split('T')[0];
-      const dayAssignments = assignments.filter(a => 
-        a.submittedAt && a.submittedAt.toISOString().split('T')[0] === dateStr
-      );
-      trend.push({
-        date: dateStr,
-        completed: dayAssignments.filter(a => a.status === 'completed').length,
-        pending: dayAssignments.filter(a => a.status !== 'completed').length
-      });
-    }
-    
+
     return {
-      trend,
-      topPerformers: memberPerformance.sort((a, b) => b.averageScore - a.averageScore).slice(0, 5),
-      distribution: {
-        byRole: teamMembers.reduce((acc, m) => {
-          acc[m.teamRole] = (acc[m.teamRole] || 0) + 1;
-          return acc;
-        }, {}),
-        byPerformance: {
-          excellent: memberPerformance.filter(m => m.averageScore >= 90).length,
-          good: memberPerformance.filter(m => m.averageScore >= 75 && m.averageScore < 90).length,
-          average: memberPerformance.filter(m => m.averageScore >= 60 && m.averageScore < 75).length,
-          poor: memberPerformance.filter(m => m.averageScore < 60).length
-        }
-      }
-    };
-  }
-  
-  async getUpcomingTasks(adminId, limit = 10) {
-    const assignments = await Assignment.find({
-      assignedBy: adminId,
-      status: { $in: ['pending', 'in_progress'] },
-      dueDate: { $gte: new Date() }
-    })
-      .sort('dueDate')
-      .limit(limit)
-      .populate('checklist', 'name')
-      .populate('primaryMember', 'name email')
-      .populate('assetId', 'assetName assetId')
-      .lean();
-    
-    return assignments.map(a => ({
-      id: a._id,
-      title: a.checklist?.name,
-      assignedTo: a.primaryMember?.name,
-      asset: a.assetId?.assetName,
-      dueDate: a.dueDate,
-      status: a.status,
-      priority: a.priority,
-      daysRemaining: Math.ceil((a.dueDate - new Date()) / (1000 * 60 * 60 * 24))
-    }));
-  }
-  
-  async getAdminRecentActivities(adminId, start, end, limit = 10) {
-    const [
-      newTeamMembers,
-      newAssets,
-      completedInspections,
-      newChecklists
-    ] = await Promise.all([
-      User.find({
-        adminId,
-        role: 'team',
-        createdAt: { $gte: start, $lte: end }
-      }).select('firstName lastName email createdAt').limit(limit).lean(),
-      Asset.find({
-        adminId,
-        createdAt: { $gte: start, $lte: end }
-      }).select('assetName assetId createdAt').limit(limit).lean(),
-      Assignment.find({
-        assignedBy: adminId,
-        completedAt: { $gte: start, $lte: end },
-        status: 'completed'
-      }).select('checklist primaryMember completedAt').populate('checklist', 'name').populate('primaryMember', 'name').limit(limit).lean(),
-      Checklist.find({
-        createdBy: adminId,
-        createdAt: { $gte: start, $lte: end }
-      }).select('name type createdAt').limit(limit).lean()
-    ]);
-    
-    const activities = [];
-    
-    newTeamMembers.forEach(m => activities.push({
-      type: 'team_member_added',
-      title: `New team member joined: ${m.firstName} ${m.lastName}`,
-      details: m.email,
-      timestamp: m.createdAt,
-      icon: '👤'
-    }));
-    
-    newAssets.forEach(a => activities.push({
-      type: 'asset_created',
-      title: `New asset added: ${a.assetName}`,
-      details: `ID: ${a.assetId}`,
-      timestamp: a.createdAt,
-      icon: '🔧'
-    }));
-    
-    completedInspections.forEach(i => activities.push({
-      type: 'inspection_completed',
-      title: `Inspection completed: ${i.checklist?.name}`,
-      details: `By: ${i.primaryMember?.name}`,
-      timestamp: i.completedAt,
-      icon: '✅'
-    }));
-    
-    newChecklists.forEach(c => activities.push({
-      type: 'checklist_created',
-      title: `New checklist created: ${c.name}`,
-      details: `Type: ${c.type}`,
-      timestamp: c.createdAt,
-      icon: '📋'
-    }));
-    
-    return activities.sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
-  }
-  
-  // ==================== TEAM MEMBER DASHBOARD ====================
-  
-  /**
-   * Get Team Member Dashboard Stats
-   * This is the missing method that was causing the error
-   */
-  async getTeamDashboardStats(teamMemberId) {
-    try {
-      // Get team member details
-      const teamMember = await User.findById(teamMemberId).lean();
-      if (!teamMember) {
-        throw new Error('Team member not found');
-      }
-      
-      // Get assigned tasks (inspections)
-      const assignments = await Assignment.find({
-        primaryMember: teamMemberId,
-        isDeleted: false
-      })
-        .populate('checklist', 'name type sections')
-        .populate('assetId', 'assetName assetId')
-        .sort({ dueDate: 1 })
-        .lean();
-      
-      const now = new Date();
-      
-      // Calculate statistics
-      const totalTasks = assignments.length;
-      const completedTasks = assignments.filter(a => a.status === 'completed').length;
-      const inProgressTasks = assignments.filter(a => a.status === 'in_progress').length;
-      const pendingTasks = assignments.filter(a => a.status === 'pending').length;
-      const overdueTasks = assignments.filter(a => 
-        a.dueDate && new Date(a.dueDate) < now && a.status !== 'completed'
-      ).length;
-      
-      // Calculate completion rate
-      const completionRate = totalTasks > 0 
-        ? Math.round((completedTasks / totalTasks) * 100) 
-        : 0;
-      
-      // Calculate on-time performance
-      const onTimeTasks = assignments.filter(a => 
-        a.status === 'completed' && 
-        a.submittedAt && 
-        a.dueDate && 
-        new Date(a.submittedAt) <= new Date(a.dueDate)
-      ).length;
-      const onTimeRate = completedTasks > 0 
-        ? Math.round((onTimeTasks / completedTasks) * 100) 
-        : 0;
-      
-      // Get performance score
-      const performanceScore = teamMember.performanceScore || 
-        (completedTasks > 0 
-          ? Math.round(assignments
-              .filter(a => a.status === 'completed')
-              .reduce((sum, a) => sum + (a.completionRate || 0), 0) / completedTasks)
-          : 0);
-      
-      // Get recent activities (last 10)
-      const recentActivities = assignments
-        .filter(a => a.submittedAt || a.createdAt)
-        .sort((a, b) => (b.submittedAt || b.createdAt) - (a.submittedAt || a.createdAt))
-        .slice(0, 10)
-        .map(a => ({
-          id: a._id,
-          type: a.status === 'completed' ? 'completed' : 'assigned',
-          title: a.checklist?.name || 'Inspection',
-          asset: a.assetId?.assetName,
-          status: a.status,
-          date: a.submittedAt || a.createdAt,
-          completionRate: a.completionRate
-        }));
-      
-      // Get upcoming tasks (next 5)
-      const upcomingTasks = assignments
-        .filter(a => a.status !== 'completed' && a.dueDate)
-        .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))
-        .slice(0, 5)
-        .map(a => ({
-          id: a._id,
-          title: a.checklist?.name,
-          asset: a.assetId?.assetName,
-          dueDate: a.dueDate,
-          daysRemaining: Math.ceil((new Date(a.dueDate) - now) / (1000 * 60 * 60 * 24)),
-          priority: a.priority
-        }));
-      
-      // Get weekly performance trend
-      const weeklyTrend = [];
-      for (let i = 6; i >= 0; i--) {
-        const weekStart = new Date();
-        weekStart.setDate(weekStart.getDate() - i);
-        weekStart.setHours(0, 0, 0, 0);
-        const weekEnd = new Date(weekStart);
-        weekEnd.setDate(weekEnd.getDate() + 1);
-        
-        const weekTasks = assignments.filter(a => 
-          a.submittedAt && 
-          new Date(a.submittedAt) >= weekStart && 
-          new Date(a.submittedAt) < weekEnd
-        );
-        
-        weeklyTrend.push({
-          date: weekStart.toLocaleDateString(),
-          completed: weekTasks.filter(a => a.status === 'completed').length,
-          pending: weekTasks.filter(a => a.status !== 'completed').length
-        });
-      }
-      
-      return {
+      success: true,
+      role: 'team',
+      data: {
+        memberInfo: {
+          id:         member._id,
+          name:       `${member.firstName || ''} ${member.lastName || ''}`.trim(),
+          email:      member.email,
+          role:       member.teamRole || 'inspector',
+          department: member.department,
+          joinDate:   member.joinDate,
+          initials:   `${member.firstName?.[0] || ''}${member.lastName?.[0] || ''}`.toUpperCase(),
+        },
+
         overview: {
-          totalTasks,
-          completedTasks,
-          inProgressTasks,
-          pendingTasks,
-          overdueTasks,
+          total:           assignments.length,
+          completed:       completed.length,
+          inProgress:      inProgress.length,
+          pending:         pending.length,
+          overdue:         overdue.length,
           completionRate,
           onTimeRate,
-          performanceScore
+          avgScore,
         },
-        recentActivities,
+
         upcomingTasks,
+        recentActivities,
+
         charts: {
           weeklyTrend,
           taskDistribution: {
-            completed: completedTasks,
-            inProgress: inProgressTasks,
-            pending: pendingTasks
-          }
+            completed:  completed.length,
+            inProgress: inProgress.length,
+            pending:    pending.length,
+            overdue:    overdue.length,
+          },
         },
-        teamMemberInfo: {
-          name: `${teamMember.firstName || ''} ${teamMember.lastName || ''}`.trim(),
-          email: teamMember.email,
-          role: teamMember.teamRole,
-          department: teamMember.department,
-          joinDate: teamMember.joinDate,
-          avatar: teamMember.initials
-        }
+      },
+    };
+  }
+
+  // ─── Super Admin Helpers ──────────────────────────────────────────────────────
+
+  async _getClientStats(start, end) {
+    const [result] = await User.aggregate([
+      { $match: { role: 'admin', isDeleted: false } },
+      {
+        $facet: {
+          total:         [{ $count: 'n' }],
+          active:        [{ $match: { status: 'active' } },   { $count: 'n' }],
+          inactive:      [{ $match: { status: 'inactive' } }, { $count: 'n' }],
+          expiringSoon:  [
+            { $match: { subscriptionEndDate: { $gt: new Date(), $lte: new Date(Date.now() + 30 * 864e5) } } },
+            { $count: 'n' },
+          ],
+          newThisPeriod: [
+            { $match: { createdAt: { $gte: start, $lte: end } } },
+            { $count: 'n' },
+          ],
+          byPlan: [{ $group: { _id: '$membershipPlan', count: { $sum: 1 } } }],
+        },
+      },
+    ]);
+
+    const byPlan = {};
+    (result?.byPlan || []).forEach(({ _id, count }) => { byPlan[_id || 'free'] = count; });
+
+    return {
+      total:         result?.total[0]?.n         || 0,
+      active:        result?.active[0]?.n        || 0,
+      inactive:      result?.inactive[0]?.n      || 0,
+      expiringSoon:  result?.expiringSoon[0]?.n  || 0,
+      newThisPeriod: result?.newThisPeriod[0]?.n || 0,
+      byPlan,
+    };
+  }
+
+  async _getRevenueStats() {
+    const planPricing = { free: 0, standard: 49, premium: 99, enterprise: 299 };
+
+    const plans = await User.aggregate([
+      { $match: { role: 'admin', isDeleted: false, status: 'active' } },
+      { $group: { _id: '$membershipPlan', count: { $sum: 1 } } },
+    ]);
+
+    let mrr = 0;
+    const byPlan = {};
+    plans.forEach(({ _id, count }) => {
+      const price = planPricing[_id] || 0;
+      mrr += price * count;
+      byPlan[_id || 'free'] = { count, pricePerMonth: price, revenue: price * count };
+    });
+
+    const totalClients = plans.reduce((s, p) => s + p.count, 0);
+
+    return {
+      mrr,
+      annual:       mrr * 12,
+      avgPerClient: totalClients > 0 ? Math.round(mrr / totalClients) : 0,
+      byPlan,
+    };
+  }
+
+  async _getSuperAdminChecklistStats(start, end) {
+    const [result] = await Checklist.aggregate([
+      {
+        $facet: {
+          total:  [{ $count: 'n' }],
+          active: [{ $match: { status: 'active' } }, { $count: 'n' }],
+          global: [{ $match: { type: 'global' } },  { $count: 'n' }],
+          custom: [{ $match: { type: 'custom' } },  { $count: 'n' }],
+          newThisPeriod: [
+            { $match: { createdAt: { $gte: start, $lte: end } } },
+            { $count: 'n' },
+          ],
+        },
+      },
+    ]);
+
+    return {
+      total:         result?.total[0]?.n         || 0,
+      active:        result?.active[0]?.n        || 0,
+      global:        result?.global[0]?.n        || 0,
+      custom:        result?.custom[0]?.n        || 0,
+      newThisPeriod: result?.newThisPeriod[0]?.n || 0,
+    };
+  }
+
+  async _getSuperAdminAssignmentStats(start, end) {
+    const [result] = await Assignment.aggregate([
+      { $match: { createdAt: { $gte: start, $lte: end } } },
+      {
+        $group: {
+          _id:             null,
+          total:           { $sum: 1 },
+          completed:       { $sum: { $cond: [{ $in: ['$status', ['completed', 'approved']] }, 1, 0] } },
+          pending:         { $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] } },
+          overdue:         { $sum: { $cond: [{ $eq: ['$status', 'overdue'] }, 1, 0] } },
+          pendingReview:   { $sum: { $cond: [{ $eq: ['$submissionStatus', 'pending_review'] }, 1, 0] } },
+          approved:        { $sum: { $cond: [{ $eq: ['$submissionStatus', 'approved'] }, 1, 0] } },
+          avgCompletion:   { $avg: '$completionRate' },
+        },
+      },
+    ]);
+
+    const r = result || {};
+    const total    = r.total    || 0;
+    const approved = r.approved || 0;
+
+    return {
+      total,
+      completed:         r.completed       || 0,
+      pending:           r.pending         || 0,
+      overdue:           r.overdue         || 0,
+      pendingReview:     r.pendingReview   || 0,
+      avgCompletionRate: Math.round(r.avgCompletion || 0),
+      approvalRate:      total > 0 ? Math.round((approved / total) * 100) : 0,
+    };
+  }
+
+  async _getRequestStats(start, end) {
+    const [result] = await ChecklistRequest.aggregate([
+      { $match: { createdAt: { $gte: start, $lte: end } } },
+      {
+        $facet: {
+          total:    [{ $count: 'n' }],
+          pending:  [{ $match: { status: 'pending' } },  { $count: 'n' }],
+          approved: [{ $match: { status: 'approved' } }, { $count: 'n' }],
+          rejected: [{ $match: { status: 'rejected' } }, { $count: 'n' }],
+          avgTime:  [
+            { $match: { timeToReview: { $ne: null } } },
+            { $group: { _id: null, avg: { $avg: '$timeToReview' } } },
+          ],
+          byUrgency: [{ $group: { _id: '$urgencyLevel', count: { $sum: 1 } } }],
+        },
+      },
+    ]);
+
+    const total    = result?.total[0]?.n    || 0;
+    const approved = result?.approved[0]?.n || 0;
+
+    const byUrgency = {};
+    (result?.byUrgency || []).forEach(({ _id, count }) => { byUrgency[_id] = count; });
+
+    return {
+      total,
+      pending:            result?.pending[0]?.n  || 0,
+      approved,
+      rejected:           result?.rejected[0]?.n || 0,
+      approvalRate:       total > 0 ? Math.round((approved / total) * 100) : 0,
+      avgReviewTimeHours: Math.round(result?.avgTime[0]?.avg || 0),
+      byUrgency,
+    };
+  }
+
+  async _getSuperAdminActivities(start, end, limit = 15) {
+    const [clients, checklists, requests] = await Promise.allSettled([
+      User.find({ role: 'admin', isDeleted: false, createdAt: { $gte: start, $lte: end } })
+        .select('customerName email createdAt').sort({ createdAt: -1 }).limit(limit).lean(),
+
+      Checklist.find({ createdAt: { $gte: start, $lte: end } })
+        .select('name type createdAt').sort({ createdAt: -1 }).limit(limit).lean(),
+
+      ChecklistRequest.find({ createdAt: { $gte: start, $lte: end } })
+        .select('checklistName status urgencyLevel createdAt').sort({ createdAt: -1 }).limit(limit).lean(),
+    ]);
+
+    const activities = [];
+
+    (clients.status === 'fulfilled' ? clients.value : []).forEach(c => activities.push({
+      type:      'client_registered',
+      title:     `New client: ${c.customerName}`,
+      detail:    c.email,
+      timestamp: c.createdAt,
+    }));
+
+    (checklists.status === 'fulfilled' ? checklists.value : []).forEach(c => activities.push({
+      type:      'checklist_created',
+      title:     `Checklist created: ${c.name}`,
+      detail:    `Type: ${c.type}`,
+      timestamp: c.createdAt,
+    }));
+
+    (requests.status === 'fulfilled' ? requests.value : []).forEach(r => activities.push({
+      type:      'request_submitted',
+      title:     `Request: ${r.checklistName}`,
+      detail:    `Status: ${r.status} | Urgency: ${r.urgencyLevel}`,
+      timestamp: r.createdAt,
+    }));
+
+    return activities
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+      .slice(0, limit);
+  }
+
+  // ─── Admin Helpers ────────────────────────────────────────────────────────────
+
+  async _getTeamStats(adminObjId, start, end) {
+    const [result] = await User.aggregate([
+      { $match: { adminId: adminObjId, role: 'team', isDeleted: false } },
+      {
+        $facet: {
+          total:   [{ $count: 'n' }],
+          active:  [{ $match: { status: 'active' } },   { $count: 'n' }],
+          inactive:[{ $match: { status: 'inactive' } }, { $count: 'n' }],
+          onLeave: [{ $match: { status: 'on_leave' } }, { $count: 'n' }],
+          byRole:  [{ $group: { _id: '$teamRole', count: { $sum: 1 } } }],
+          avgPerf: [
+            { $match: { performanceScore: { $gt: 0 } } },
+            { $group: { _id: null, avg: { $avg: '$performanceScore' } } },
+          ],
+          totals: [
+            {
+              $group: {
+                _id:       null,
+                assigned:  { $sum: '$assignedCount' },
+                completed: { $sum: '$completedCount' },
+              },
+            },
+          ],
+        },
+      },
+    ]);
+
+    const byRole = {};
+    (result?.byRole || []).forEach(({ _id, count }) => { byRole[_id || 'inspector'] = count; });
+
+    const assigned  = result?.totals[0]?.assigned  || 0;
+    const completed = result?.totals[0]?.completed || 0;
+
+    // Top 5 performers via lookup
+    const topPerformers = await User.aggregate([
+      { $match: { adminId: adminObjId, role: 'team', isDeleted: false, status: 'active' } },
+      {
+        $lookup: {
+          from:         'assignments',
+          localField:   '_id',
+          foreignField: 'assignedToTeamMembers.userId',
+          as:           'allAssignments',
+        },
+      },
+      {
+        $addFields: {
+          totalAssigned: { $size: '$allAssignments' },
+          totalCompleted: {
+            $size: {
+              $filter: {
+                input: '$allAssignments',
+                cond:  { $in: ['$$this.status', ['completed', 'approved']] },
+              },
+            },
+          },
+        },
+      },
+      {
+        $project: {
+          firstName: 1, lastName: 1, teamRole: 1,
+          performanceScore: 1, totalAssigned: 1, totalCompleted: 1,
+          completionRate: {
+            $cond: [
+              { $eq: ['$totalAssigned', 0] }, 0,
+              { $multiply: [{ $divide: ['$totalCompleted', '$totalAssigned'] }, 100] },
+            ],
+          },
+        },
+      },
+      { $sort: { completionRate: -1, performanceScore: -1 } },
+      { $limit: 5 },
+    ]);
+
+    return {
+      total:          result?.total[0]?.n    || 0,
+      active:         result?.active[0]?.n   || 0,
+      inactive:       result?.inactive[0]?.n || 0,
+      onLeave:        result?.onLeave[0]?.n  || 0,
+      byRole,
+      avgPerformance: Math.round(result?.avgPerf[0]?.avg || 0),
+      completionRate: assigned > 0 ? Math.round((completed / assigned) * 100) : 0,
+      topPerformers:  topPerformers.map(m => ({
+        id:             m._id,
+        name:           `${m.firstName || ''} ${m.lastName || ''}`.trim(),
+        role:           m.teamRole,
+        completionRate: Math.round(m.completionRate),
+        totalAssigned:  m.totalAssigned,
+        totalCompleted: m.totalCompleted,
+      })),
+    };
+  }
+
+  async _getAssetStats(adminObjId) {
+    const [result] = await Asset.aggregate([
+      { $match: { adminId: adminObjId, isDeleted: false } },
+      {
+        $facet: {
+          total:       [{ $count: 'n' }],
+          active:      [{ $match: { status: 'Active' } },          { $count: 'n' }],
+          maintenance: [{ $match: { status: 'In Maintenance' } },  { $count: 'n' }],
+          retired:     [{ $match: { status: 'Retired' } },         { $count: 'n' }],
+          byCategory:  [{ $group: { _id: '$assetCategory', count: { $sum: 1 } } }],
+          byCondition: [{ $group: { _id: '$assetCondition', count: { $sum: 1 } } }],
+        },
+      },
+    ]);
+
+    const byCategory = {};
+    (result?.byCategory || []).forEach(({ _id, count }) => { byCategory[_id || 'Other'] = count; });
+
+    const byCondition = {};
+    (result?.byCondition || []).forEach(({ _id, count }) => { byCondition[_id || 'Normal'] = count; });
+
+    return {
+      total:        result?.total[0]?.n       || 0,
+      active:       result?.active[0]?.n      || 0,
+      maintenance:  result?.maintenance[0]?.n || 0,
+      retired:      result?.retired[0]?.n     || 0,
+      byCategory,
+      byCondition,
+      avgHealthScore: 0, // computed via virtual — skip aggregation cost
+    };
+  }
+
+  async _getAdminChecklistStats(adminId, start, end) {
+    const [result] = await Checklist.aggregate([
+      { $match: { createdBy: new mongoose.Types.ObjectId(adminId) } },
+      {
+        $facet: {
+          total:         [{ $count: 'n' }],
+          newThisPeriod: [
+            { $match: { createdAt: { $gte: start, $lte: end } } },
+            { $count: 'n' },
+          ],
+          byType: [{ $group: { _id: '$type', count: { $sum: 1 } } }],
+        },
+      },
+    ]);
+
+    const byType = {};
+    (result?.byType || []).forEach(({ _id, count }) => { byType[_id] = count; });
+
+    // Aggregate assignment stats for this admin's checklists
+    const [assignStats] = await Assignment.aggregate([
+      { $match: { assignedBy: new mongoose.Types.ObjectId(adminId) } },
+      {
+        $group: {
+          _id:          null,
+          total:        { $sum: 1 },
+          avgCompletion:{ $avg: '$completionRate' },
+        },
+      },
+    ]);
+
+    return {
+      total:             result?.total[0]?.n         || 0,
+      newThisPeriod:     result?.newThisPeriod[0]?.n || 0,
+      byType,
+      totalAssignments:  assignStats?.total        || 0,
+      avgCompletionRate: Math.round(assignStats?.avgCompletion || 0),
+    };
+  }
+
+  async _getInspectionStats(adminId, start, end) {
+    const adminObjId = new mongoose.Types.ObjectId(adminId);
+
+    const assignments = await Assignment.find({
+      assignedBy: adminObjId,
+      createdAt:  { $gte: start, $lte: end },
+    }).select('status submissionStatus completionRate dueDate submittedAt').lean();
+
+    const completed    = assignments.filter(a => ['completed', 'approved'].includes(a.status));
+    const pending      = assignments.filter(a => ['pending', 'in_progress'].includes(a.status));
+    const overdue      = assignments.filter(a => a.status === 'overdue');
+    const approved     = assignments.filter(a => a.submissionStatus === 'approved');
+    const rejected     = assignments.filter(a => a.submissionStatus === 'rejected');
+    const pendingReview= assignments.filter(a => a.submissionStatus === 'pending_review');
+
+    const avgCompletionRate = completed.length > 0
+      ? Math.round(completed.reduce((s, a) => s + (a.completionRate || 0), 0) / completed.length)
+      : 0;
+
+    // Daily trend (last 30 days max — cap to avoid huge arrays)
+    const daysDiff = Math.min(Math.ceil((end - start) / 864e5), 30);
+    const dailyTrend = Array.from({ length: daysDiff + 1 }, (_, i) => {
+      const day = new Date(start);
+      day.setDate(day.getDate() + i);
+      const dayStr = day.toISOString().split('T')[0];
+
+      const dayItems = assignments.filter(a => a.submittedAt?.toISOString().split('T')[0] === dayStr);
+      return {
+        date:     dayStr,
+        total:    dayItems.length,
+        approved: dayItems.filter(a => a.submissionStatus === 'approved').length,
+        rejected: dayItems.filter(a => a.submissionStatus === 'rejected').length,
       };
-    } catch (error) {
-      console.error('Error in getTeamDashboardStats:', error);
-      throw error;
+    });
+
+    return {
+      total:             assignments.length,
+      completed:         completed.length,
+      pending:           pending.length,
+      overdue:           overdue.length,
+      approved:          approved.length,
+      rejected:          rejected.length,
+      pendingReview:     pendingReview.length,
+      avgCompletionRate,
+      approvalRate:      assignments.length > 0
+        ? Math.round((approved.length / assignments.length) * 100)
+        : 0,
+      dailyTrend,
+    };
+  }
+
+  async _getAdminActivities(adminId, start, end, limit = 15) {
+    const adminObjId = new mongoose.Types.ObjectId(adminId);
+
+    const [teamMembers, assets, checklists, inspections] = await Promise.allSettled([
+      User.find({ adminId: adminObjId, role: 'team', createdAt: { $gte: start, $lte: end } })
+        .select('firstName lastName email createdAt').sort({ createdAt: -1 }).limit(limit).lean(),
+
+      Asset.find({ adminId: adminObjId, createdAt: { $gte: start, $lte: end } })
+        .select('assetName assetId createdAt').sort({ createdAt: -1 }).limit(limit).lean(),
+
+      Checklist.find({ createdBy: adminObjId, createdAt: { $gte: start, $lte: end } })
+        .select('name type createdAt').sort({ createdAt: -1 }).limit(limit).lean(),
+
+      Assignment.find({
+        assignedBy: adminObjId,
+        status:     { $in: ['completed', 'approved'] },
+        completedAt:{ $gte: start, $lte: end },
+      })
+        .select('checklistName completedAt')
+        .sort({ completedAt: -1 }).limit(limit).lean(),
+    ]);
+
+    const activities = [];
+
+    (teamMembers.status === 'fulfilled' ? teamMembers.value : []).forEach(m => activities.push({
+      type:      'member_added',
+      title:     `Team member added: ${m.firstName || ''} ${m.lastName || ''}`.trim(),
+      detail:    m.email,
+      timestamp: m.createdAt,
+    }));
+
+    (assets.status === 'fulfilled' ? assets.value : []).forEach(a => activities.push({
+      type:      'asset_created',
+      title:     `Asset added: ${a.assetName}`,
+      detail:    `ID: ${a.assetId}`,
+      timestamp: a.createdAt,
+    }));
+
+    (checklists.status === 'fulfilled' ? checklists.value : []).forEach(c => activities.push({
+      type:      'checklist_created',
+      title:     `Checklist created: ${c.name}`,
+      detail:    `Type: ${c.type}`,
+      timestamp: c.createdAt,
+    }));
+
+    (inspections.status === 'fulfilled' ? inspections.value : []).forEach(i => activities.push({
+      type:      'inspection_completed',
+      title:     `Inspection completed: ${i.checklistName}`,
+      detail:    null,
+      timestamp: i.completedAt,
+    }));
+
+    return activities
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+      .slice(0, limit);
+  }
+
+  // ─── Utility ──────────────────────────────────────────────────────────────────
+
+  _resolveDateRange({ dateRange = 30, startDate, endDate } = {}) {
+    const end   = endDate   ? new Date(endDate)   : new Date();
+    const start = startDate ? new Date(startDate) : new Date();
+    if (!startDate) start.setDate(start.getDate() - Number(dateRange));
+
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+      throw new Error('Invalid date range provided');
     }
+
+    return { start, end };
   }
 }
 

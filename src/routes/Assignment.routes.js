@@ -27,7 +27,7 @@ router.get(
   AssignmentController.getCalendarTasks
 );
 
-// ==================== INSPECTION HISTORY (SPECIFIC PATH - MUST BE BEFORE /:id) ====================
+// ==================== INSPECTION HISTORY ====================
 router.get(
   '/history',
   allowRoles('super_admin', 'admin', 'team'),
@@ -42,11 +42,10 @@ router.get(
 );
 
 router.delete(
-  '/:id/submission',
+  '/submissions/:id',  // CHANGED: moved to be more RESTful and avoid conflict
   allowRoles('super_admin', 'admin'),
   AssignmentController.deleteSubmission
 );
-
 
 // ==================== CREATE ASSIGNMENTS ====================
 router.post(
@@ -143,12 +142,5 @@ router.post(
   AssignmentController.saveDraft
 );
 
-// Debug: Log all registered routes
-console.log('Assignment Routes Registered:');
-router.stack.forEach((layer) => {
-  if (layer.route) {
-    console.log(`${Object.keys(layer.route.methods).join(',')} ${layer.route.path}`);
-  }
-});
 
 export default router;

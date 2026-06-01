@@ -11,6 +11,7 @@ import apiV1Router from "./routes/index.js";
 import globalErrorHandler from "./middlewares/globalErrorHandler.js";
 import logger from "./utils/logger.js";
 import { startHourlyBackup, startDailyCopy, startRestoreCron } from "./cron/dbBackup.cron.js";
+import cronService from './cron/cron.service.js';
 //import { checkAndUpdateExpiredClients } from './cron/cron.service.js'
 
 const __filename = fileURLToPath(import.meta.url);
@@ -30,12 +31,13 @@ app.get("/health", (req, res) => {
 });
 
 // ==================== CRON JOBS (only in production) ====================
-if (process.env.NODE_ENV === "production") {
+if (process.env.NODE_ENV === "development") {
   try {
     startHourlyBackup();
     startRestoreCron();
     startDailyCopy();
     checkAndUpdateExpiredClients();
+    cronService()
     logger.info("✅ Cron jobs started successfully");
   } catch (error) {
     logger.error("❌ Failed to start cron jobs:", error);

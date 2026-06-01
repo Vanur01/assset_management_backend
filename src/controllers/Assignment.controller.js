@@ -85,7 +85,7 @@ class AssignmentController {
   });
 
   getSubmissionDetail = asyncHandler(async (req, res) => {
-    const result = await AssignmentService.getAssignmentDetails(
+    const result = await AssignmentService.getSubmissionDetail(
       req.params.id,
       req.user._id,
       req.user.role
@@ -154,10 +154,12 @@ class AssignmentController {
     return sendResponse(res, 200, 'Assignees retrieved successfully', result);
   });
 
+  // FIXED: Added missing req.query parameter
   getInspectionHistory = asyncHandler(async (req, res) => {
     const result = await AssignmentService.getInspectionHistory(
       req.user._id,
-      req.query
+      req.user.role,
+      req.query  // <-- FIXED: Added req.query parameter
     );
     return sendResponse(res, 200, 'Inspection history retrieved successfully', result);
   });

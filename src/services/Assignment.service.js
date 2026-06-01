@@ -3,11 +3,13 @@ import Checklist from '../models/checklist.model.js';
 import User from '../models/user.model.js';
 import Asset from '../models/asset.model.js';
 import ExcelJS from 'exceljs';
+import mongoose from 'mongoose';
 import {
   NotFoundError,
   AuthorizationError,
   ValidationError,
   BadRequestError,
+  ConflictError,
 } from '../errors/customError.js';
 
 class AssignmentService {
@@ -17,24 +19,72 @@ class AssignmentService {
   // ═══════════════════════════════════════════════════════════════
 
   async assignChecklistToAdmin(assignedByUserId, assignedByRole, data) {
-    const { checklistId, adminId, dueDate, priority, notes, assetIds = [] } = data;
+    const { checklistId, adminId, dueDate, priority, notes } = data;
 
     if (!checklistId || !adminId || !dueDate) {
       throw new BadRequestError('checklistId, adminId and dueDate are required');
     }
 
-    const checklist = await Checklist.findById(checklistId);
+    // Fetch complete checklist data
+    const checklist = await Checklist.findById(checklistId).populate('createdBy', 'name email');
     if (!checklist) throw new NotFoundError('Checklist not found');
 
     const admin = await User.findById(adminId);
     if (!admin || admin.role !== 'admin') throw new NotFoundError('Admin not found');
 
-    const assets = await this._resolveAssets(assetIds);
+    // Check for existing active assignment to the same admin
+    const existingAssignment = await Assignment.findOne({
+      checklist: checklistId,
+      assignedToAdmin: adminId,
+      status: { $in: ['pending', 'in_progress', 'submitted'] }
+    });
+
+    if (existingAssignment) {
+      throw new ConflictError(
+        `This checklist has already been assigned to admin "${admin.customerName || admin.name || admin.email}". 
+        Please complete or cancel the existing assignment before creating a new one.`,
+        {
+          existingAssignmentId: existingAssignment._id,
+          existingStatus: existingAssignment.status,
+          assignedAt: existingAssignment.createdAt
+        }
+      );
+    }
+
+    // Check if admin already has a completed assignment for this checklist
+    const completedAssignment = await Assignment.findOne({
+      checklist: checklistId,
+      assignedToAdmin: adminId,
+      status: { $in: ['completed', 'approved'] }
+    });
+
+    if (completedAssignment) {
+      throw new ConflictError(
+        `Admin "${admin.customerName || admin.name || admin.email}" has already completed this checklist. 
+        Please use the clone functionality to create a new assignment.`,
+        {
+          completedAssignmentId: completedAssignment._id,
+          completedAt: completedAssignment.completedAt
+        }
+      );
+    }
+
+    // Store complete checklist data for later display
+    const checklistData = {
+      _id: checklist._id,
+      name: checklist.name,
+      version: checklist.version,
+      type: checklist.type,
+      category: checklist.category,
+      sections: checklist.sections,
+      totalFields: checklist.sections?.reduce((sum, s) => sum + (s.fields?.length || 0), 0) || 0,
+    };
 
     const assignment = await Assignment.create({
       checklist: checklistId,
       checklistName: checklist.name,
       checklistVersion: checklist.version,
+      checklistData: checklistData,
       assignedBy: assignedByUserId,
       assignedByRole,
       assignedToAdmin: adminId,
@@ -42,79 +92,383 @@ class AssignmentService {
       customerId: adminId,
       customerName: admin.customerName || admin.name || admin.email,
       customerEmail: admin.email,
-      assets,
+      assets: [],
+      assetData: null,
       dueDate: new Date(dueDate),
       priority: priority || 'medium',
       notes: notes || '',
       status: 'pending',
     });
 
-    return assignment;
+    // Populate and return the created assignment
+    return await this._populateAssignment(assignment);
   }
 
   async assignChecklistToTeam(assignedByUserId, assignedByRole, data) {
-    const { checklistId, teamMemberIds, assetIds = [], dueDate, priority, notes } = data;
+    const { checklistId, teamMemberIds, assetId = null, dueDate, priority, notes } = data;
 
     if (!checklistId || !dueDate) {
       throw new BadRequestError('checklistId and dueDate are required');
     }
 
-    // Normalise to array and guard against empty
     const memberIdList = Array.isArray(teamMemberIds) ? teamMemberIds : [teamMemberIds];
     if (!memberIdList.length || memberIdList.some(id => !id)) {
       throw new BadRequestError('At least one valid teamMemberId is required');
     }
 
-    const checklist = await Checklist.findById(checklistId);
+    // Fetch checklist with populated fields
+    const checklist = await Checklist.findById(checklistId)
+      .populate('createdBy', 'name email customerName customerEmail role');
+
     if (!checklist) throw new NotFoundError('Checklist not found');
 
-    // Validate all members
+    const checklistData = {
+      _id: checklist._id,
+      name: checklist.name,
+      version: checklist.version,
+      type: checklist.type,
+      category: checklist.category,
+      sections: checklist.sections,
+      totalFields: checklist.sections?.reduce((sum, s) => sum + (s.fields?.length || 0), 0) || 0,
+    };
+
+    // Fetch and validate team members
+    const teamMembers = [];
+
+    for (const memberId of memberIdList) {
+      const member = await User.findById(memberId).populate('adminId', 'name email customerName customerEmail');
+      if (!member || member.role !== 'team') {
+        throw new NotFoundError(`Team member not found or invalid role: ${memberId}`);
+      }
+
+      // Check for existing active assignment for this team member
+      const existingAssignment = await Assignment.findOne({
+        checklist: checklistId,
+        'assignedToTeamMembers.userId': memberId,
+        status: { $in: ['pending', 'in_progress', 'submitted'] }
+      });
+
+      if (existingAssignment) {
+        throw new ConflictError(
+          `Team member "${member.name || member.email}" already has an active assignment for checklist "${checklist.name}". 
+          Please complete or cancel the existing assignment before creating a new one.`,
+          {
+            memberId: memberId,
+            memberName: member.name || member.email,
+            existingAssignmentId: existingAssignment._id,
+            existingStatus: existingAssignment.status
+          }
+        );
+      }
+
+      // Check if team member has already completed this checklist
+      const completedAssignment = await Assignment.findOne({
+        checklist: checklistId,
+        'assignedToTeamMembers.userId': memberId,
+        status: { $in: ['completed', 'approved'] }
+      });
+
+      if (completedAssignment) {
+        throw new ConflictError(
+          `Team member "${member.name || member.email}" has already completed this checklist. 
+          Please use the clone functionality to create a new assignment.`,
+          {
+            memberId: memberId,
+            memberName: member.name || member.email,
+            completedAssignmentId: completedAssignment._id,
+            completedAt: completedAssignment.completedAt
+          }
+        );
+      }
+
+      teamMembers.push({
+        userId: member._id,
+        name: member.name || member.email,
+        email: member.email,
+        status: 'pending',
+        assignedAt: new Date(),
+      });
+    }
+
+    // Fetch single asset - FIXED: Removed assignedTo population
+    let asset = null;
+    let assets = [];
+    let customerId = null;
+    let customerName = null;
+    let customerEmail = null;
+
+    if (assetId) {
+      asset = await Asset.findById(assetId)
+        .populate('adminId', 'name email customerName customerEmail role');
+      // Removed .populate('assignedTo', 'name email')
+
+      if (!asset) {
+        throw new NotFoundError(`Asset not found with ID: ${assetId}`);
+      }
+
+      // Store single asset in assets array for compatibility
+      assets = [{
+        assetId: asset._id,
+        assetName: asset.name || asset.assetName,
+        assetTagNumber: asset.tagNumber || asset.assetTagNumber,
+        assetLocation: asset.location || asset.assetLocation,
+        assetCategory: asset.category || asset.assetCategory,
+        assetStatus: asset.status,
+        adminId: asset.adminId?._id,
+        adminName: asset.adminId?.name,
+        adminEmail: asset.adminId?.email,
+      }];
+
+      // Extract customer information from asset's adminId
+      if (asset.adminId) {
+        customerId = asset.adminId._id;
+        customerName = asset.adminId.customerName || asset.adminId.name;
+        customerEmail = asset.adminId.customerEmail || asset.adminId.email;
+      }
+    }
+
+    // If no customer found from asset, try to get from checklist's createdBy
+    if (!customerId && checklist.createdBy) {
+      customerId = checklist.createdBy._id;
+      customerName = checklist.createdBy.customerName || checklist.createdBy.name;
+      customerEmail = checklist.createdBy.customerEmail || checklist.createdBy.email;
+    }
+
+    // If still no customer, try to get from the first team member's admin
+    if (!customerId && teamMembers.length > 0) {
+      for (const member of teamMembers) {
+        const memberUser = await User.findById(member.userId).populate('adminId', 'name email customerName customerEmail');
+        if (memberUser && memberUser.adminId) {
+          customerId = memberUser.adminId._id;
+          customerName = memberUser.adminId.customerName || memberUser.adminId.name;
+          customerEmail = memberUser.adminId.customerEmail || memberUser.adminId.email;
+          if (customerName) break;
+        }
+      }
+    }
+
+    const assetData = assets.length > 0 ? {
+      _id: assets[0].assetId,
+      name: assets[0].assetName,
+      tagNumber: assets[0].assetTagNumber,
+      location: assets[0].assetLocation,
+      category: assets[0].assetCategory,
+    } : null;
+
+    // Create the assignment
+    const assignment = await Assignment.create({
+      checklist: checklistId,
+      checklistName: checklist.name,
+      checklistVersion: checklist.version,
+      checklistData: checklistData,
+      assignedBy: assignedByUserId,
+      assignedByRole,
+      assignedToTeamMembers: teamMembers,
+      customerId,
+      customerName,
+      customerEmail,
+      assets: assets,
+      assetData: assetData,
+      dueDate: new Date(dueDate),
+      priority: priority || 'medium',
+      notes: notes || '',
+      status: 'pending',
+    });
+
+    // Populate and return the created assignment
+    return await this._populateAssignment(assignment);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  RE-ASSIGNMENT FUNCTIONS
+  // ═══════════════════════════════════════════════════════════════
+
+  async reassignToAdmin(assignmentId, newAdminId, reassignedByUserId, reassignedByRole, data = {}) {
+    const { dueDate, priority, notes } = data;
+
+    // Find existing assignment
+    const existingAssignment = await Assignment.findById(assignmentId);
+    if (!existingAssignment) throw new NotFoundError('Assignment not found');
+
+    // Check if assignment can be reassigned
+    if (['completed', 'approved'].includes(existingAssignment.status)) {
+      throw new BadRequestError(
+        `Cannot reassign a ${existingAssignment.status} assignment. Please create a new assignment instead.`
+      );
+    }
+
+    // Fetch new admin
+    const newAdmin = await User.findById(newAdminId);
+    if (!newAdmin || newAdmin.role !== 'admin') throw new NotFoundError('Admin not found');
+
+    // Check if new admin already has an active assignment for this checklist
+    const existingAdminAssignment = await Assignment.findOne({
+      checklist: existingAssignment.checklist,
+      assignedToAdmin: newAdminId,
+      status: { $in: ['pending', 'in_progress', 'submitted'] },
+      _id: { $ne: assignmentId }
+    });
+
+    if (existingAdminAssignment) {
+      throw new ConflictError(
+        `Admin "${newAdmin.customerName || newAdmin.name || newAdmin.email}" already has an active assignment for this checklist.`
+      );
+    }
+
+    // Update the assignment
+    existingAssignment.assignedToAdmin = newAdminId;
+    existingAssignment.assignedToAdminName = newAdmin.customerName || newAdmin.name || newAdmin.email;
+    existingAssignment.customerId = newAdminId;
+    existingAssignment.customerName = newAdmin.customerName || newAdmin.name || newAdmin.email;
+    existingAssignment.customerEmail = newAdmin.email;
+    existingAssignment.assignedToTeamMembers = [];
+    existingAssignment.assets = [];
+    existingAssignment.assetData = null;
+
+    if (dueDate) existingAssignment.dueDate = new Date(dueDate);
+    if (priority) existingAssignment.priority = priority;
+    if (notes) existingAssignment.notes = notes;
+
+    existingAssignment.reassignedBy = reassignedByUserId;
+    existingAssignment.reassignedByRole = reassignedByRole;
+    existingAssignment.reassignedAt = new Date();
+    existingAssignment.reassignmentHistory = existingAssignment.reassignmentHistory || [];
+    existingAssignment.reassignmentHistory.push({
+      fromType: 'team',
+      fromId: existingAssignment.assignedToTeamMembers?.[0]?.userId || null,
+      toType: 'admin',
+      toId: newAdminId,
+      reassignedBy: reassignedByUserId,
+      reassignedAt: new Date(),
+      reason: notes || 'Reassigned to admin'
+    });
+
+    await existingAssignment.save();
+    return await this._populateAssignment(existingAssignment);
+  }
+
+  async reassignToTeam(assignmentId, newTeamMemberIds, reassignedByUserId, reassignedByRole, data = {}) {
+    const { assetIds = [], dueDate, priority, notes } = data;
+
+    // Find existing assignment
+    const existingAssignment = await Assignment.findById(assignmentId);
+    if (!existingAssignment) throw new NotFoundError('Assignment not found');
+
+    // Check if assignment can be reassigned
+    if (['completed', 'approved'].includes(existingAssignment.status)) {
+      throw new BadRequestError(
+        `Cannot reassign a ${existingAssignment.status} assignment. Please create a new assignment instead.`
+      );
+    }
+
+    const memberIdList = Array.isArray(newTeamMemberIds) ? newTeamMemberIds : [newTeamMemberIds];
+    if (!memberIdList.length) {
+      throw new BadRequestError('At least one team member is required');
+    }
+
+    // Fetch and validate team members
     const teamMembers = [];
     for (const memberId of memberIdList) {
       const member = await User.findById(memberId);
       if (!member || member.role !== 'team') {
         throw new NotFoundError(`Team member not found or invalid role: ${memberId}`);
       }
+
+      // Check if team member already has an active assignment for this checklist
+      const existingTeamAssignment = await Assignment.findOne({
+        checklist: existingAssignment.checklist,
+        'assignedToTeamMembers.userId': memberId,
+        status: { $in: ['pending', 'in_progress', 'submitted'] },
+        _id: { $ne: assignmentId }
+      });
+
+      if (existingTeamAssignment) {
+        throw new ConflictError(
+          `Team member "${member.name || member.email}" already has an active assignment for this checklist.`
+        );
+      }
+
       teamMembers.push({
         userId: member._id,
         name: member.name || member.email,
+        email: member.email,
         status: 'pending',
         assignedAt: new Date(),
       });
     }
 
-    const assets = await this._resolveAssets(assetIds);
-
-    // Derive customer from first asset's admin
+    // Fetch assets - FIXED: Removed assignedTo population
+    const assets = [];
     let customerId = null;
     let customerName = null;
-    for (const assetId of assetIds) {
-      const asset = await Asset.findById(assetId);
-      if (asset?.adminId && !customerId) {
-        customerId = asset.adminId;
-        const customer = await User.findById(customerId);
-        customerName = customer?.customerName || customer?.name || null;
-        break;
+    let customerEmail = null;
+
+    if (assetIds && assetIds.length > 0) {
+      for (const assetId of assetIds) {
+        const asset = await Asset.findById(assetId).populate('adminId', 'name email customerName customerEmail');
+        // Removed .populate('assignedTo', 'name email')
+        
+        if (asset) {
+          assets.push({
+            assetId: asset._id,
+            assetName: asset.name || asset.assetName,
+            assetTagNumber: asset.tagNumber || asset.assetTagNumber,
+            assetLocation: asset.location || asset.assetLocation,
+            assetCategory: asset.category || asset.assetCategory,
+            assetStatus: asset.status,
+            adminId: asset.adminId?._id,
+            adminName: asset.adminId?.name,
+            adminEmail: asset.adminId?.email,
+          });
+
+          if (asset.adminId && !customerId) {
+            customerId = asset.adminId._id;
+            customerName = asset.adminId.customerName || asset.adminId.name;
+            customerEmail = asset.adminId.customerEmail || asset.adminId.email;
+          }
+        }
       }
     }
 
-    const assignment = await Assignment.create({
-      checklist: checklistId,
-      checklistName: checklist.name,
-      checklistVersion: checklist.version,
-      assignedBy: assignedByUserId,
-      assignedByRole,
-      assignedToTeamMembers: teamMembers,
-      customerId,
-      customerName,
-      assets,
-      dueDate: new Date(dueDate),
-      priority: priority || 'medium',
-      notes: notes || '',
-      status: 'pending',
+    // Update the assignment
+    existingAssignment.assignedToTeamMembers = teamMembers;
+    existingAssignment.assignedToAdmin = null;
+    existingAssignment.assignedToAdminName = null;
+    existingAssignment.assets = assets;
+    existingAssignment.assetData = assets.map(asset => ({
+      _id: asset.assetId,
+      name: asset.assetName,
+      tagNumber: asset.assetTagNumber,
+      location: asset.assetLocation,
+      category: asset.assetCategory,
+    }));
+
+    if (customerId) {
+      existingAssignment.customerId = customerId;
+      existingAssignment.customerName = customerName;
+      existingAssignment.customerEmail = customerEmail;
+    }
+
+    if (dueDate) existingAssignment.dueDate = new Date(dueDate);
+    if (priority) existingAssignment.priority = priority;
+    if (notes) existingAssignment.notes = notes;
+
+    existingAssignment.reassignedBy = reassignedByUserId;
+    existingAssignment.reassignedByRole = reassignedByRole;
+    existingAssignment.reassignedAt = new Date();
+    existingAssignment.reassignmentHistory = existingAssignment.reassignmentHistory || [];
+    existingAssignment.reassignmentHistory.push({
+      fromType: 'admin',
+      fromId: existingAssignment.assignedToAdmin,
+      toType: 'team',
+      toId: memberIdList,
+      reassignedBy: reassignedByUserId,
+      reassignedAt: new Date(),
+      reason: notes || 'Reassigned to team'
     });
 
-    return assignment;
+    await existingAssignment.save();
+    return await this._populateAssignment(existingAssignment);
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -132,11 +486,11 @@ class AssignmentService {
 
     const [assignments, total] = await Promise.all([
       Assignment.find(query)
-        .populate('checklist', 'name type category')
+        .populate('checklist', 'name type category sections')
         .populate('assignedBy', 'name email role')
         .populate('assignedToAdmin', 'name email customerName')
         .populate('assignedToTeamMembers.userId', 'name email')
-        .populate('assets.assetId', 'assetName tagNumber currentLocation')
+        .populate('assets.assetId', 'assetName tagNumber currentLocation assetCategory')
         .sort({ [sortField]: sortOrder })
         .skip(skip)
         .limit(limit)
@@ -144,11 +498,37 @@ class AssignmentService {
       Assignment.countDocuments(query),
     ]);
 
+    const enhancedAssignments = assignments.map(assignment => ({
+      ...assignment,
+      displayData: {
+        checklistInfo: {
+          id: assignment.checklist?._id || assignment.checklist,
+          name: assignment.checklistName,
+          version: assignment.checklistVersion,
+          type: assignment.checklist?.type,
+          totalFields: assignment.checklistData?.totalFields ||
+            assignment.checklist?.sections?.reduce((sum, s) => sum + (s.fields?.length || 0), 0) || 0,
+        },
+        assetInfo: (assignment.assets || []).map(asset => ({
+          id: asset.assetId?._id || asset.assetId,
+          name: asset.assetName,
+          tagNumber: asset.assetTagNumber,
+          location: asset.assetLocation,
+          category: asset.assetCategory,
+        })),
+        customerInfo: {
+          id: assignment.customerId,
+          name: assignment.customerName,
+          email: assignment.customerEmail,
+        },
+      }
+    }));
+
     const stats = await this._getAssignmentStats(userId, userRole, filters);
 
     return {
       success: true,
-      assignments,
+      assignments: enhancedAssignments,
       stats,
       pagination: {
         page,
@@ -166,59 +546,119 @@ class AssignmentService {
       await Assignment.findById(assignmentId)
     );
     if (!assignment) throw new NotFoundError('Assignment not found');
-    return assignment;
+
+    const enhancedAssignment = {
+      ...assignment.toObject(),
+      displayData: {
+        checklistInfo: {
+          id: assignment.checklist?._id || assignment.checklist,
+          name: assignment.checklistName,
+          version: assignment.checklistVersion,
+          type: assignment.checklist?.type,
+          category: assignment.checklist?.category,
+          sections: assignment.checklistData?.sections || assignment.checklist?.sections || [],
+          totalFields: assignment.checklistData?.totalFields ||
+            assignment.checklist?.sections?.reduce((sum, s) => sum + (s.fields?.length || 0), 0) || 0,
+        },
+        assetInfo: (assignment.assets || []).map(asset => ({
+          id: asset.assetId?._id || asset.assetId,
+          name: asset.assetName,
+          tagNumber: asset.assetTagNumber,
+          location: asset.assetLocation,
+          category: asset.assetCategory,
+        })),
+        customerInfo: {
+          id: assignment.customerId,
+          name: assignment.customerName,
+          email: assignment.customerEmail,
+        },
+      }
+    };
+
+    return enhancedAssignment;
   }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  UTILITY FUNCTIONS - Check Existing Assignments
+  // ═══════════════════════════════════════════════════════════════
+
+  async checkExistingAssignment(checklistId, assigneeId, assigneeType) {
+    const query = {
+      checklist: checklistId,
+      status: { $in: ['pending', 'in_progress', 'submitted'] }
+    };
+
+    if (assigneeType === 'admin') {
+      query.assignedToAdmin = assigneeId;
+    } else if (assigneeType === 'team') {
+      query['assignedToTeamMembers.userId'] = assigneeId;
+    }
+
+    const existing = await Assignment.findOne(query);
+
+    if (existing) {
+      return {
+        exists: true,
+        assignment: existing,
+        status: existing.status,
+        message: `This checklist is already assigned to this ${assigneeType}`
+      };
+    }
+
+    return { exists: false };
+  }
+
+  async getAssignmentHistory(checklistId, assigneeId, assigneeType) {
+    const query = {
+      checklist: checklistId,
+      status: { $in: ['completed', 'approved', 'rejected'] }
+    };
+
+    if (assigneeType === 'admin') {
+      query.assignedToAdmin = assigneeId;
+    } else if (assigneeType === 'team') {
+      query['assignedToTeamMembers.userId'] = assigneeId;
+    }
+
+    const history = await Assignment.find(query)
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return {
+      hasHistory: history.length > 0,
+      count: history.length,
+      assignments: history
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  REMAINING METHODS
+  // ═══════════════════════════════════════════════════════════════
 
   async getAssignmentDetails(assignmentId, userId, userRole) {
     const assignment = await this.getAssignmentById(assignmentId);
 
-    // Fetch full checklist sections separately
-    const checklist = await Checklist.findById(assignment.checklist._id)
-      .populate('createdBy', 'name email');
+    let fullChecklist = assignment.checklistData;
+    if (!fullChecklist || !fullChecklist.sections) {
+      const checklist = await Checklist.findById(assignment.checklist._id)
+        .populate('createdBy', 'name email');
+      fullChecklist = {
+        ...checklist.toObject(),
+        totalFields: checklist.sections?.reduce((sum, s) => sum + (s.fields?.length || 0), 0) || 0,
+      };
+    }
 
     return {
-      ...assignment.toObject(),
-      checklist: {
-        ...assignment.checklist.toObject(),
-        sections: checklist?.sections || [],
-      },
+      ...assignment,
+      checklist: fullChecklist,
+      assets: assignment.assetData || assignment.assets,
     };
   }
 
-  // Add this method to your AssignmentService class
-
-async deleteSubmission(assignmentId, userId, userRole) {
-  // Find the assignment
-  const assignment = await Assignment.findById(assignmentId);
-  if (!assignment) throw new NotFoundError('Assignment not found');
-
-  // Check authorization (only admin/super_admin can delete)
-  const isAuthorized = userRole === 'admin' || userRole === 'super_admin';
-  if (!isAuthorized) {
-    throw new AuthorizationError('Only administrators can delete submissions');
+  async getSubmissionDetail(assignmentId, userId, userRole) {
+    const assignment = await this.getAssignmentById(assignmentId);
+    return assignment;
   }
-
-  // Store submission info for response
-  const submissionInfo = {
-    id: assignment._id,
-    checklistName: assignment.checklistName,
-    submittedBy: assignment.assignedToTeamMembers[0]?.name || 'Unknown',
-    submittedAt: assignment.submittedAt,
-    status: assignment.submissionStatus,
-  };
-
-  // Hard delete the assignment
-  await assignment.deleteOne();
-
-  return {
-    message: 'Submission deleted successfully',
-    submission: submissionInfo,
-  };
-}
-
-  // ═══════════════════════════════════════════════════════════════
-  //  UPDATE & DELETE
-  // ═══════════════════════════════════════════════════════════════
 
   async updateAssignment(assignmentId, userId, userRole, updateData) {
     const assignment = await Assignment.findById(assignmentId);
@@ -284,7 +724,6 @@ async deleteSubmission(assignmentId, userId, userRole) {
     assignment.completedAt = null;
     assignment.submissionStatus = null;
 
-    // Reset team member statuses too
     assignment.assignedToTeamMembers.forEach(tm => {
       tm.status = 'pending';
       tm.completedAt = null;
@@ -293,10 +732,6 @@ async deleteSubmission(assignmentId, userId, userRole) {
     await assignment.save();
     return this._populateAssignment(assignment);
   }
-
-  // ═══════════════════════════════════════════════════════════════
-  //  SUBMISSIONS
-  // ═══════════════════════════════════════════════════════════════
 
   async getSubmissionsForChecklist(checklistId, userId, userRole, filters = {}) {
     const query = {
@@ -331,6 +766,32 @@ async deleteSubmission(assignmentId, userId, userRole) {
     };
   }
 
+  async deleteSubmission(assignmentId, userId, userRole) {
+    const assignment = await Assignment.findById(assignmentId);
+    if (!assignment) throw new NotFoundError('Assignment not found');
+
+    const isAuthorized = userRole === 'admin' || userRole === 'super_admin';
+    if (!isAuthorized) {
+      throw new AuthorizationError('Only administrators can delete submissions');
+    }
+
+    const submissionInfo = {
+      id: assignment._id,
+      checklistName: assignment.checklistName,
+      assets: assignment.assets.map(a => a.assetName),
+      submittedBy: assignment.assignedToTeamMembers[0]?.name || 'Unknown',
+      submittedAt: assignment.submittedAt,
+      status: assignment.submissionStatus,
+    };
+
+    await assignment.deleteOne();
+
+    return {
+      message: 'Submission deleted successfully',
+      submission: submissionInfo,
+    };
+  }
+
   async reviewSubmission(assignmentId, userId, userRole, data) {
     const { action, rejectionReason, reviewComments } = data;
 
@@ -349,7 +810,6 @@ async deleteSubmission(assignmentId, userId, userRole) {
       throw new AuthorizationError('You do not have permission to review this submission');
     }
 
-    // FIX: accept both 'submitted' status OR 'pending_review' submissionStatus
     const isReviewable =
       assignment.status === 'submitted' ||
       assignment.submissionStatus === 'pending_review';
@@ -381,10 +841,6 @@ async deleteSubmission(assignmentId, userId, userRole) {
     return this._populateAssignment(assignment);
   }
 
-  // ═══════════════════════════════════════════════════════════════
-  //  INSPECTION — Team Member actions
-  // ═══════════════════════════════════════════════════════════════
-
   async submitInspection(assignmentId, userId, userRole, data, files) {
     const assignment = await Assignment.findById(assignmentId);
     if (!assignment) throw new NotFoundError('Assignment not found');
@@ -403,16 +859,18 @@ async deleteSubmission(assignmentId, userId, userRole) {
 
     const { responses, overallRating, inspectorNotes, notes } = data;
 
-    const checklist = await Checklist.findById(assignment.checklist);
-    if (!checklist) throw new NotFoundError('Checklist not found');
+    let checklist = assignment.checklistData;
+    if (!checklist || !checklist.sections) {
+      checklist = await Checklist.findById(assignment.checklist);
+      if (!checklist) throw new NotFoundError('Checklist not found');
+    }
 
-    const totalFields = checklist.sections.reduce(
+    const totalFields = checklist.sections?.reduce(
       (sum, s) => sum + (s.fields?.length || 0), 0
-    );
+    ) || 0;
 
-    const processedResponses = this._processResponses(responses, checklist.sections);
+    const processedResponses = this._processResponses(responses, checklist.sections || []);
 
-    // FIX: store totalFields so pre-save can compute completion % correctly
     assignment.totalFieldsSnapshot = totalFields;
     assignment.responses = processedResponses;
     assignment.overallRating = overallRating ? parseInt(overallRating, 10) : null;
@@ -424,7 +882,6 @@ async deleteSubmission(assignmentId, userId, userRole) {
     assignment.completedAt = new Date();
     assignment.isDraft = false;
 
-    // Attach uploaded files
     if (files) {
       if (files.photos) {
         assignment.uploadedPhotos = files.photos.map(f => f.path || f.location);
@@ -441,7 +898,6 @@ async deleteSubmission(assignmentId, userId, userRole) {
       }
     }
 
-    // Mark the submitting team member as completed
     const memberEntry = assignment.assignedToTeamMembers.find(
       tm => tm.userId.toString() === userId.toString()
     );
@@ -490,7 +946,6 @@ async deleteSubmission(assignmentId, userId, userRole) {
     assignment.lastSavedAt = new Date();
     assignment.draftCount = (assignment.draftCount || 0) + 1;
 
-    // Mark submitting member as in_progress
     const memberEntry = assignment.assignedToTeamMembers.find(
       tm => tm.userId.toString() === userId.toString()
     );
@@ -502,160 +957,152 @@ async deleteSubmission(assignmentId, userId, userRole) {
     return assignment;
   }
 
-  // ═══════════════════════════════════════════════════════════════
-  //  INSPECTION HISTORY  (primary fix area)
-  // ═══════════════════════════════════════════════════════════════
+  async getInspectionHistory(userId, userRole, filters = {}) {
+    try {
+      const isValidObjectId = (id) => {
+        return id && mongoose.Types.ObjectId.isValid(id);
+      };
 
-async getInspectionHistory(userId, userRole, filters = {}) {
-  try {
-    // Ensure userId is valid for database queries
-    const isValidObjectId = (id) => {
-      return id && mongoose.Types.ObjectId.isValid(id);
-    };
+      const {
+        status,
+        search,
+        dateFrom,
+        dateTo,
+        page: rawPage = 1,
+        limit: rawLimit = 20,
+        sortBy = 'submittedAt',
+        sortOrder = 'desc',
+        customerId,
+      } = filters;
 
-    const {
-      status,
-      search,
-      dateFrom,
-      dateTo,
-      page: rawPage = 1,
-      limit: rawLimit = 20,
-      sortBy = 'submittedAt',
-      sortOrder = 'desc',
-      customerId,
-    } = filters;
+      const query = {};
+      query.status = { $in: ['submitted', 'approved', 'rejected', 'completed'] };
 
-    // ── Build DB query ──────────────────────────────────────────
-    const query = {};
-
-    // Only show completed/submitted inspections by default
-    query.status = { $in: ['submitted', 'approved', 'rejected', 'completed'] };
-
-    // Handle status filter
-    if (status && status !== 'all' && status !== 'undefined') {
-      const submissionStatuses = ['pending_review', 'approved', 'rejected', 'needs_revision'];
-      if (submissionStatuses.includes(status)) {
-        query.submissionStatus = status;
-      } else {
-        query.status = status;
+      if (status && status !== 'all' && status !== 'undefined') {
+        const submissionStatuses = ['pending_review', 'approved', 'rejected', 'needs_revision'];
+        if (submissionStatuses.includes(status)) {
+          query.submissionStatus = status;
+        } else {
+          query.status = status;
+        }
       }
-    }
 
-    // Role-based scoping - only add userId to query if it's a valid ObjectId
-    if (userRole === 'team') {
-      if (isValidObjectId(userId)) {
-        query['assignedToTeamMembers.userId'] = userId;
+      if (userRole === 'team') {
+        if (isValidObjectId(userId)) {
+          query['assignedToTeamMembers.userId'] = userId;
+        }
+      } else if (userRole === 'admin') {
+        if (isValidObjectId(userId)) {
+          query.$or = [
+            { assignedBy: userId },
+            { assignedToAdmin: userId },
+            { customerId: userId },
+          ];
+        }
+      } else if (userRole === 'super_admin' && customerId) {
+        if (isValidObjectId(customerId)) {
+          query.customerId = customerId;
+        }
       }
-    } else if (userRole === 'admin') {
-      if (isValidObjectId(userId)) {
-        query.$or = [
-          { assignedBy: userId },
-          { assignedToAdmin: userId },
-          { customerId: userId },
+
+      if (dateFrom || dateTo) {
+        query.submittedAt = {};
+        if (dateFrom) query.submittedAt.$gte = new Date(dateFrom);
+        if (dateTo) query.submittedAt.$lte = new Date(dateTo);
+      }
+
+      if (search && search.trim()) {
+        const searchRegex = { $regex: search.trim(), $options: 'i' };
+        const searchOr = [
+          { checklistName: searchRegex },
+          { customerName: searchRegex },
+          { 'assets.assetName': searchRegex },
+          { 'assets.assetTagNumber': searchRegex },
         ];
+
+        if (query.$or) {
+          query.$and = [{ $or: query.$or }, { $or: searchOr }];
+          delete query.$or;
+        } else {
+          query.$or = searchOr;
+        }
       }
-    } else if (userRole === 'super_admin' && customerId) {
-      if (isValidObjectId(customerId)) {
-        query.customerId = customerId;
-      }
-    }
 
-    // Date range filter
-    if (dateFrom || dateTo) {
-      query.submittedAt = {};
-      if (dateFrom) query.submittedAt.$gte = new Date(dateFrom);
-      if (dateTo) query.submittedAt.$lte = new Date(dateTo);
-    }
+      const page = Math.max(parseInt(rawPage, 10) || 1, 1);
+      const limit = Math.min(parseInt(rawLimit, 10) || 20, 100);
+      const skip = (page - 1) * limit;
+      const sortDir = sortOrder === 'asc' ? 1 : -1;
+      const sortField = sortBy === 'date' ? 'submittedAt' : sortBy;
 
-    // Search filter
-    if (search && search.trim()) {
-      const searchRegex = { $regex: search.trim(), $options: 'i' };
-      const searchOr = [
-        { checklistName: searchRegex },
-        { customerName: searchRegex },
-        { 'assets.assetName': searchRegex },
-        { 'assets.assetTagNumber': searchRegex },
-      ];
-      
-      if (query.$or) {
-        query.$and = [{ $or: query.$or }, { $or: searchOr }];
-        delete query.$or;
-      } else {
-        query.$or = searchOr;
-      }
-    }
+      const [submissions, total] = await Promise.all([
+        Assignment.find(query)
+          .populate('checklist', 'name type category')
+          .populate('assignedBy', 'name email')
+          .populate('assignedToTeamMembers.userId', 'name email')
+          .populate('assets.assetId', 'assetName assetId tagNumber currentLocation assetCategory')
+          .populate('reviewedBy', 'name email')
+          .sort({ [sortField]: sortDir, _id: sortDir })
+          .skip(skip)
+          .limit(limit)
+          .lean(),
+        Assignment.countDocuments(query),
+      ]);
 
-    // ── Pagination ──────────────────────────────────────────────
-    const page = Math.max(parseInt(rawPage, 10) || 1, 1);
-    const limit = Math.min(parseInt(rawLimit, 10) || 20, 100);
-    const skip = (page - 1) * limit;
-    const sortDir = sortOrder === 'asc' ? 1 : -1;
-    const sortField = sortBy === 'date' ? 'submittedAt' : sortBy;
+      const enhancedSubmissions = submissions.map(submission => ({
+        ...submission,
+        displaySummary: {
+          checklistName: submission.checklistName,
+          assetNames: (submission.assets || []).map(a => a.assetName).join(', '),
+          assetCount: submission.assets?.length || 0,
+          customerName: submission.customerName,
+          submittedBy: submission.assignedToTeamMembers?.[0]?.name || 'Unknown',
+        }
+      }));
 
-    // ── Execute queries ─────────────────────────────────────────────────
-    const [submissions, total] = await Promise.all([
-      Assignment.find(query)
-        .populate('checklist', 'name type category')
-        .populate('assignedBy', 'name email')
-        .populate('assignedToTeamMembers.userId', 'name email')
-        .populate('assets.assetId', 'assetName assetId tagNumber currentLocation')
-        .populate('reviewedBy', 'name email')
-        .sort({ [sortField]: sortDir, _id: sortDir })
-        .skip(skip)
-        .limit(limit)
-        .lean(),
-      Assignment.countDocuments(query),
-    ]);
-
-    // ── Aggregate stats ───────────────────────────────────────────────
-    const statsAgg = await Assignment.aggregate([
-      { $match: query },
-      {
-        $group: {
-          _id: null,
-          total: { $sum: 1 },
-          approved: { $sum: { $cond: [{ $eq: ['$submissionStatus', 'approved'] }, 1, 0] } },
-          rejected: { $sum: { $cond: [{ $eq: ['$submissionStatus', 'rejected'] }, 1, 0] } },
-          underReview: { $sum: { $cond: [{ $eq: ['$submissionStatus', 'pending_review'] }, 1, 0] } },
-          needsRevision: { $sum: { $cond: [{ $eq: ['$submissionStatus', 'needs_revision'] }, 1, 0] } },
-          avgScore: { $avg: '$completionRate' },
+      const statsAgg = await Assignment.aggregate([
+        { $match: query },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: 1 },
+            approved: { $sum: { $cond: [{ $eq: ['$submissionStatus', 'approved'] }, 1, 0] } },
+            rejected: { $sum: { $cond: [{ $eq: ['$submissionStatus', 'rejected'] }, 1, 0] } },
+            underReview: { $sum: { $cond: [{ $eq: ['$submissionStatus', 'pending_review'] }, 1, 0] } },
+            needsRevision: { $sum: { $cond: [{ $eq: ['$submissionStatus', 'needs_revision'] }, 1, 0] } },
+            avgScore: { $avg: '$completionRate' },
+          },
         },
-      },
-    ]);
+      ]);
 
-    const aggResult = statsAgg[0] || {};
-    const avgScore = aggResult.avgScore != null ? Math.round(aggResult.avgScore) : 0;
+      const aggResult = statsAgg[0] || {};
+      const avgScore = aggResult.avgScore != null ? Math.round(aggResult.avgScore) : 0;
 
-    return {
-      success: true,
-      message: 'Inspection history retrieved successfully',
-      submissions,
-      stats: {
-        total: aggResult.total || 0,
-        approved: aggResult.approved || 0,
-        rejected: aggResult.rejected || 0,
-        underReview: aggResult.underReview || 0,
-        needsRevision: aggResult.needsRevision || 0,
-        avgScore,
-      },
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit),
-        hasNextPage: page < Math.ceil(total / limit),
-        hasPrevPage: page > 1,
-      },
-    };
-  } catch (error) {
-    console.error('Error in getInspectionHistory:', error);
-    throw error;
+      return {
+        success: true,
+        message: 'Inspection history retrieved successfully',
+        submissions: enhancedSubmissions,
+        stats: {
+          total: aggResult.total || 0,
+          approved: aggResult.approved || 0,
+          rejected: aggResult.rejected || 0,
+          underReview: aggResult.underReview || 0,
+          needsRevision: aggResult.needsRevision || 0,
+          avgScore,
+        },
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+          hasNextPage: page < Math.ceil(total / limit),
+          hasPrevPage: page > 1,
+        },
+      };
+    } catch (error) {
+      console.error('Error in getInspectionHistory:', error);
+      throw error;
+    }
   }
-}
-
-  // ═══════════════════════════════════════════════════════════════
-  //  LISTS & VIEWS
-  // ═══════════════════════════════════════════════════════════════
 
   async getAssignees(checklistId, userId, userRole) {
     const query = { checklist: checklistId };
@@ -696,7 +1143,6 @@ async getInspectionHistory(userId, userRole, filters = {}) {
   async getCalendarTasks(userId, userRole, filters = {}) {
     const query = this._buildAssignmentQuery(userId, userRole, filters);
     query.status = { $in: ['pending', 'in_progress'] };
-    // FIX: only include docs that have a dueDate
     query.dueDate = { ...(query.dueDate || {}), $ne: null };
 
     const assignments = await Assignment.find(query)
@@ -706,19 +1152,32 @@ async getInspectionHistory(userId, userRole, filters = {}) {
 
     const calendarMap = new Map();
 
-    assignments.forEach(a => {
-      if (!a.dueDate) return;                          // safety guard
-      const dateKey = new Date(a.dueDate).toISOString().split('T')[0];
+    assignments.forEach(assignment => {
+      if (!assignment.dueDate) return;
+
+      const dateKey = new Date(assignment.dueDate).toISOString().split('T')[0];
       if (!calendarMap.has(dateKey)) calendarMap.set(dateKey, []);
 
       calendarMap.get(dateKey).push({
-        id: a._id,
-        title: a.checklistName || a.checklist?.name,
-        assets: (a.assets || []).map(asset => asset.assetName).filter(Boolean),
-        priority: a.priority,
-        status: a.status,
-        dueDate: a.dueDate,
-        completionRate: a.completionRate,
+        id: assignment._id,
+        title: assignment.checklistName || assignment.checklist?.name,
+        checklistInfo: {
+          id: assignment.checklist?._id || assignment.checklist,
+          name: assignment.checklistName,
+          type: assignment.checklist?.type,
+        },
+        assets: (assignment.assets || []).map(asset => ({
+          id: asset.assetId?._id || asset.assetId,
+          name: asset.assetName,
+          tagNumber: asset.assetTagNumber,
+          location: asset.assetLocation,
+        })),
+        assetCount: assignment.assets?.length || 0,
+        priority: assignment.priority,
+        status: assignment.status,
+        dueDate: assignment.dueDate,
+        completionRate: assignment.completionRate,
+        customerName: assignment.customerName,
       });
     });
 
@@ -726,10 +1185,6 @@ async getInspectionHistory(userId, userRole, filters = {}) {
       .map(([date, tasks]) => ({ date, tasks, count: tasks.length }))
       .sort((a, b) => a.date.localeCompare(b.date));
   }
-
-  // ═══════════════════════════════════════════════════════════════
-  //  ANALYTICS & STATISTICS
-  // ═══════════════════════════════════════════════════════════════
 
   async getChecklistAnalytics(checklistId, userId, userRole, filters = {}) {
     const query = { checklist: checklistId };
@@ -777,7 +1232,6 @@ async getInspectionHistory(userId, userRole, filters = {}) {
       .map(([date, count]) => ({ date, count }))
       .sort((a, b) => a.date.localeCompare(b.date));
 
-    // Performer stats from assignedToTeamMembers
     const performerMap = new Map();
     completed.forEach(a => {
       (a.assignedToTeamMembers || []).forEach(tm => {
@@ -866,10 +1320,6 @@ async getInspectionHistory(userId, userRole, filters = {}) {
     };
   }
 
-  // ═══════════════════════════════════════════════════════════════
-  //  EXPORT
-  // ═══════════════════════════════════════════════════════════════
-
   async exportAssignments(userId, userRole, filters = {}) {
     const query = this._buildAssignmentQuery(userId, userRole, filters);
 
@@ -883,9 +1333,9 @@ async getInspectionHistory(userId, userRole, filters = {}) {
     const worksheet = workbook.addWorksheet('Assignments');
 
     worksheet.columns = [
-      { header: 'Form Name', key: 'formName', width: 30 },
-      { header: 'Assigned To (Team)', key: 'assignedTo', width: 30 },
-      { header: 'Assets', key: 'assets', width: 30 },
+      { header: 'Checklist Name', key: 'formName', width: 30 },
+      { header: 'Assets', key: 'assets', width: 40 },
+      { header: 'Customer', key: 'customer', width: 25 },
       { header: 'Due Date', key: 'dueDate', width: 15 },
       { header: 'Status', key: 'status', width: 15 },
       { header: 'Submission Status', key: 'submissionStatus', width: 18 },
@@ -894,25 +1344,19 @@ async getInspectionHistory(userId, userRole, filters = {}) {
       { header: 'Priority', key: 'priority', width: 10 },
     ];
 
-    // Style header row
     worksheet.getRow(1).font = { bold: true };
     worksheet.getRow(1).alignment = { vertical: 'middle', horizontal: 'center' };
 
     assignments.forEach(a => {
-      const teamNames = (a.assignedToTeamMembers || [])
-        .map(tm => tm.userId?.name || tm.name || '')
-        .filter(Boolean)
-        .join(', ');
-
       const assetNames = (a.assets || [])
-        .map(asset => asset.assetName || '')
+        .map(asset => asset.assetName || asset.assetId?.assetName || '')
         .filter(Boolean)
         .join(', ');
 
       worksheet.addRow({
         formName: a.checklistName || a.checklist?.name || '-',
-        assignedTo: teamNames || a.customerName || '-',
         assets: assetNames || '-',
+        customer: a.customerName || '-',
         dueDate: a.dueDate ? new Date(a.dueDate).toISOString().split('T')[0] : '-',
         status: a.status || '-',
         submissionStatus: a.submissionStatus || '-',
@@ -929,16 +1373,10 @@ async getInspectionHistory(userId, userRole, filters = {}) {
   //  PRIVATE HELPERS
   // ═══════════════════════════════════════════════════════════════
 
-  /**
-   * Build a MongoDB query scoped to the requesting user's role.
-   * FIX: search $or is merged safely using $and so it never clobbers
-   *      the role-based $or already in the query.
-   */
   _buildAssignmentQuery(userId, userRole, filters) {
     const query = {};
     const { status, priority, checklistId, search, dateFrom, dateTo, customerId, assetId } = filters;
 
-    // Role-based scoping
     if (userRole === 'super_admin') {
       if (customerId) query.customerId = customerId;
     } else if (userRole === 'admin') {
@@ -962,7 +1400,6 @@ async getInspectionHistory(userId, userRole, filters = {}) {
       if (dateTo) query.dueDate.$lte = new Date(dateTo);
     }
 
-    // FIX: merge search $or with role $or using $and
     if (search) {
       const searchRegex = { $regex: search, $options: 'i' };
       const searchOr = [
@@ -983,12 +1420,7 @@ async getInspectionHistory(userId, userRole, filters = {}) {
     return query;
   }
 
-  /**
-   * Stats counts scoped to the same filters as the listing query.
-   * FIX: rebuilds the query instead of spreading a potentially status-keyed object.
-   */
   async _getAssignmentStats(userId, userRole, filters) {
-    // Build base query without status filter for cross-status counts
     const baseFilters = { ...filters };
     delete baseFilters.status;
     const baseQuery = this._buildAssignmentQuery(userId, userRole, baseFilters);
@@ -1007,29 +1439,35 @@ async getInspectionHistory(userId, userRole, filters = {}) {
     return { total, pending, inProgress, completed, overdue, approved, rejected };
   }
 
-  /** Resolve an array of assetIds to embedded asset sub-documents. */
-  async _resolveAssets(assetIds = []) {
+  async _resolveAssets(assetIds) {
+    if (!assetIds || !assetIds.length) return [];
+
+    const assetIdList = Array.isArray(assetIds) ? assetIds : [assetIds];
     const assets = [];
-    for (const assetId of assetIds) {
-      const asset = await Asset.findById(assetId);
+
+    for (const assetId of assetIdList) {
+      const asset = await Asset.findById(assetId)
+        .populate('adminId', 'name email customerName customerEmail');
+      // Removed .populate('assignedTo', 'name email')
+
       if (asset) {
         assets.push({
           assetId: asset._id,
-          assetName: asset.assetName || asset.assetId,
-          assetTagNumber: asset.tagNumber,
-          assetLocation: asset.currentLocation,
-          assetCategory: asset.assetCategory,
-          assignedAt: new Date(),
+          assetName: asset.name || asset.assetName,
+          assetTagNumber: asset.tagNumber || asset.assetTagNumber,
+          assetLocation: asset.location || asset.assetLocation,
+          assetCategory: asset.category || asset.assetCategory,
+          assetStatus: asset.status,
+          adminId: asset.adminId?._id || asset.adminId,
+          adminName: asset.adminId?.name || asset.adminId?.customerName,
+          adminEmail: asset.adminId?.email || asset.adminId?.customerEmail,
         });
       }
     }
+
     return assets;
   }
 
-  /**
-   * Map raw response payloads to the stored fieldResponse sub-documents.
-   * Unknown fieldIds are stored with null label/type so data isn't lost.
-   */
   _processResponses(responses = [], sections = []) {
     const fieldMap = new Map();
     (sections || []).forEach(section => {
@@ -1051,7 +1489,6 @@ async getInspectionHistory(userId, userRole, filters = {}) {
     });
   }
 
-  /** Populate all reference paths on an assignment document. */
   async _populateAssignment(assignment) {
     if (!assignment) return null;
     return Assignment.findById(assignment._id)
