@@ -32,11 +32,6 @@ const AuditLogSchema = new mongoose.Schema({
     required: true,
     default: null
   },
-  actorEmail: {
-    type: String,
-    required: true,
-    index: true
-  },
   adminId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',

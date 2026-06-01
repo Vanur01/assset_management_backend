@@ -2,7 +2,7 @@
 import mongoose from 'mongoose';
 import Asset from '../models/asset.model.js';
 import AuditLog from '../models/auditLog.model.js';
-import User from '../models/user.model.js'; // Import User model
+import User from '../models/user.model.js';
 import { NotFoundError, ValidationError, ForbiddenError, ConflictError } from '../errors/customError.js';
 
 class AssetService {
@@ -39,21 +39,17 @@ class AssetService {
   }
 
   async addAsset(assetData, adminId, userId, userRole = 'admin', req = null) {
-    // Validate adminId exists
     if (!adminId) {
       throw new ValidationError([{ field: 'adminId', message: 'Admin ID is required' }]);
     }
 
-    // Validate that the user has permission to add asset
     if (userRole === 'team') {
-      // Verify team member belongs to this admin
       const user = await User.findById(this.toObjectId(userId));
       if (!user || user.adminId?.toString() !== adminId.toString()) {
         throw new ForbiddenError('You are not authorized to add assets for this admin');
       }
     }
 
-    // Validate assetCategoryId if provided
     if (assetData.assetCategoryId) {
       const AssetCategory = mongoose.model('AssetCategory');
       if (AssetCategory) {
@@ -64,7 +60,6 @@ class AssetService {
       }
     }
 
-    // Check for existing asset with same identifiers
     const orConditions = [];
     if (assetData.assetId) orConditions.push({ assetId: assetData.assetId });
     if (assetData.serialNumber) orConditions.push({ serialNumber: assetData.serialNumber });
@@ -86,11 +81,9 @@ class AssetService {
       }
     }
 
-    // Generate IDs if not provided
     if (!assetData.assetId) assetData.assetId = await this.generateUniqueAssetId(adminId);
     if (!assetData.tagNumber) assetData.tagNumber = await this.generateUniqueTagNumber(adminId);
 
-    // Initialize status history
     const statusHistory = [{
       status: assetData.status || 'Active',
       changedAt: new Date(),
@@ -125,7 +118,7 @@ class AssetService {
         userAgent: req?.headers?.['user-agent']
       }
     );
-  
+
     return asset._doc;
   }
 
@@ -148,36 +141,34 @@ class AssetService {
 
     // Role-based base filter
     if (userRole === 'admin') {
-      // Admin can see their own assets AND assets created by their team members
+      // For admin: adminId = userId (admin's own ID)
+      // Show assets where adminId matches the admin's ID
       filter.adminId = this.toObjectId(userId);
-      
-      // Also include assets where team members (under this admin) are assigned
-      // Find all team members under this admin
-      const teamMembers = await User.find({ 
-        adminId: this.toObjectId(userId), 
+
+      // Also include assets created by team members under this admin
+      const teamMembers = await User.find({
+        adminId: this.toObjectId(userId),
         role: 'team',
-        isDeleted: false 
+        isDeleted: false
       }).select('_id');
-      
+
       const teamMemberIds = teamMembers.map(member => member._id);
-      
+
       if (teamMemberIds.length > 0) {
         filter.$or = [
-          { createdBy: this.toObjectId(userId) }, // Admin's own created assets
-          { createdBy: { $in: teamMemberIds } }, // Team members' created assets
-          { 'assignedUsers.primaryUser': { $in: teamMemberIds } },
-          { 'assignedUsers.secondaryUser': { $in: teamMemberIds } },
-          { 'assignedUsers.custodian': { $in: teamMemberIds } }
+          { createdBy: { $in: teamMemberIds } } // Team members' created assets
         ];
       }
     } else if (userRole === 'team') {
-      // Team members can only see assets belonging to their admin's pool
-      // AND where they are personally linked (assigned or creator)
+      // For team member: adminId comes from user.adminId (the admin they belong to)
+      // Show assets where adminId matches the admin they work for
       if (!adminId) {
         throw new ValidationError([{ field: 'adminId', message: 'Admin ID is required for team members' }]);
       }
-      
+
       filter.adminId = this.toObjectId(adminId);
+
+      // Team members can only see assets where they are personally involved
       filter.$or = [
         { 'assignedUsers.primaryUser': this.toObjectId(userId) },
         { 'assignedUsers.secondaryUser': this.toObjectId(userId) },
@@ -244,7 +235,25 @@ class AssetService {
   }
 
   async getAssetById(assetId, userRole, adminId, userId) {
-    const asset = await Asset.findById(this.toObjectId(assetId))
+    // First, check if user has permission to view this asset
+    const query = { _id: this.toObjectId(assetId), isDeleted: false };
+
+    if (userRole === 'admin') {
+      query.adminId = this.toObjectId(userId);
+    } else if (userRole === 'team') {
+      if (!adminId) {
+        throw new ValidationError([{ field: 'adminId', message: 'Admin ID is required' }]);
+      }
+      query.adminId = this.toObjectId(adminId);
+      query.$or = [
+        { 'assignedUsers.primaryUser': this.toObjectId(userId) },
+        { 'assignedUsers.secondaryUser': this.toObjectId(userId) },
+        { 'assignedUsers.custodian': this.toObjectId(userId) },
+        { createdBy: this.toObjectId(userId) }
+      ];
+    }
+
+    const asset = await Asset.findOne(query)
       .populate('adminId', 'name email customerName')
       .populate('createdBy', 'name email firstName lastName')
       .populate('assetCategoryId', 'name')
@@ -253,11 +262,7 @@ class AssetService {
       .populate('assignedUsers.custodian', 'name email firstName lastName')
       .lean({ virtuals: true });
 
-    if (!asset) throw new NotFoundError('Asset not found');
-
-    if (!await this.hasAssetAccess(asset, userId, userRole, adminId)) {
-      throw new ForbiddenError('You do not have access to this asset');
-    }
+    if (!asset) throw new NotFoundError('Asset not found or you do not have permission to view it');
 
     return this.formatAssetResponse(asset);
   }
@@ -266,11 +271,17 @@ class AssetService {
     const asset = await Asset.findById(this.toObjectId(assetId));
     if (!asset) throw new NotFoundError('Asset not found');
 
-    if (!await this.hasAssetAccess(asset, userId, userRole, adminId)) {
-      throw new ForbiddenError('You do not have access to this asset');
-    }
+    // Check permissions
+    if (userRole === 'admin') {
+      if (asset.adminId.toString() !== userId.toString()) {
+        throw new ForbiddenError('You can only update assets belonging to your organization');
+      }
+    } else if (userRole === 'team') {
+      // Check if team member belongs to the asset's admin
+      if (asset.adminId.toString() !== adminId?.toString()) {
+        throw new ForbiddenError('You do not have permission to update this asset');
+      }
 
-    if (userRole === 'team') {
       const restrictedFields = ['adminId', 'teamId', 'createdBy', 'assetId', 'tagNumber', 'serialNumber'];
       for (const field of restrictedFields) {
         if (updateData[field] !== undefined) {
@@ -312,16 +323,10 @@ class AssetService {
     const asset = await Asset.findById(this.toObjectId(assetId));
     if (!asset) throw new NotFoundError('Asset not found');
 
-    if (!await this.hasAssetAccess(asset, userId, userRole, adminId)) {
-      throw new ForbiddenError('You do not have access to this asset');
-    }
-
-    // Only admin can delete assets (team members cannot)
     if (userRole !== 'admin') {
       throw new ForbiddenError('Only admins can delete assets');
     }
 
-    // Verify admin owns this asset
     if (asset.adminId.toString() !== userId.toString()) {
       throw new ForbiddenError('You can only delete assets that belong to your organization');
     }
@@ -350,8 +355,15 @@ class AssetService {
     const asset = await Asset.findById(this.toObjectId(assetId));
     if (!asset) throw new NotFoundError('Asset not found');
 
-    if (!await this.hasAssetAccess(asset, userId, userRole, adminId)) {
-      throw new ForbiddenError('You do not have access to this asset');
+    // Check permissions
+    if (userRole === 'admin') {
+      if (asset.adminId.toString() !== userId.toString()) {
+        throw new ForbiddenError('You can only update status for assets belonging to your organization');
+      }
+    } else if (userRole === 'team') {
+      if (asset.adminId.toString() !== adminId?.toString()) {
+        throw new ForbiddenError('You do not have permission to update this asset status');
+      }
     }
 
     const validStatuses = ['Active', 'In Maintenance', 'Retired', 'Under Repair', 'Decommissioned'];
@@ -391,22 +403,27 @@ class AssetService {
     const originalAsset = await Asset.findById(this.toObjectId(assetId));
     if (!originalAsset) throw new NotFoundError('Original asset not found');
 
-    if (!await this.hasAssetAccess(originalAsset, userId, userRole, adminId)) {
-      throw new ForbiddenError('You do not have access to this asset');
-    }
-
     if (!originalAsset.canBeCloned) {
       throw new ForbiddenError('This asset cannot be cloned');
     }
 
-    // Get next clone version from existing clones count
+    // Check permissions for cloning
+    if (userRole === 'admin') {
+      if (originalAsset.adminId.toString() !== userId.toString()) {
+        throw new ForbiddenError('You can only clone assets belonging to your organization');
+      }
+    } else if (userRole === 'team') {
+      if (originalAsset.adminId.toString() !== adminId?.toString()) {
+        throw new ForbiddenError('You do not have permission to clone this asset');
+      }
+    }
+
     const existingCloneCount = await Asset.countDocuments({
       clonedFrom: this.toObjectId(assetId),
       isDeleted: false
     });
     const nextCloneVersion = existingCloneCount + 1;
 
-    // Build clone object — strip fields that must be unique or reset
     const cloneObj = originalAsset.toObject();
     delete cloneObj._id;
     delete cloneObj.__v;
@@ -444,7 +461,6 @@ class AssetService {
       }]
     };
 
-    // Generate unique identifiers for the clone
     newAssetData.assetId = await this.generateUniqueAssetId(resolvedAdminId);
 
     if (cloneData.tagNumber) {
@@ -470,7 +486,7 @@ class AssetService {
       }
     );
 
-    return await this.getAssetById(clonedAsset._id, userRole, adminId, userId);
+    return this.formatAssetResponse(clonedAsset.toObject());
   }
 
   async getCloneList(assetId, userId, userRole, adminId = null) {
@@ -479,8 +495,17 @@ class AssetService {
 
     if (!originalAsset) throw new NotFoundError('Original asset not found');
 
-    if (!await this.hasAssetAccess(originalAsset, userId, userRole, adminId)) {
-      throw new ForbiddenError('You do not have access to this asset');
+    // Check permissions
+    if (userRole === 'admin') {
+      if (originalAsset.adminId?._id?.toString() !== userId.toString() &&
+        originalAsset.adminId?.toString() !== userId.toString()) {
+        throw new ForbiddenError('You do not have permission to view clones of this asset');
+      }
+    } else if (userRole === 'team') {
+      if (originalAsset.adminId?._id?.toString() !== adminId?.toString() &&
+        originalAsset.adminId?.toString() !== adminId?.toString()) {
+        throw new ForbiddenError('You do not have permission to view clones of this asset');
+      }
     }
 
     const clones = await Asset.find({
@@ -497,71 +522,6 @@ class AssetService {
       clones: clones.map(clone => this.formatAssetResponse(clone)),
       totalClones: clones.length
     };
-  }
-
-  /**
-   * Check if user has access to asset
-   */
-  async hasAssetAccess(asset, userId, userRole, adminId = null) {
-    if (!asset) return false;
-    
-    const userIdObj = this.toObjectId(userId);
-    const assetAdminId = asset.adminId?._id || asset.adminId;
-    
-    if (userRole === 'admin') {
-      // Admin has access if:
-      // 1. Asset belongs to this admin, OR
-      // 2. Asset was created by a team member under this admin
-      if (assetAdminId?.toString() === userId.toString()) {
-        return true;
-      }
-      
-      // Check if asset was created by a team member under this admin
-      const creatorId = asset.createdBy?._id || asset.createdBy;
-      if (creatorId) {
-        const creator = await User.findById(creatorId);
-        if (creator && creator.adminId?.toString() === userId.toString()) {
-          return true;
-        }
-      }
-      
-      // Check if asset is assigned to a team member under this admin
-      const assignedUsers = [
-        asset.assignedUsers?.primaryUser,
-        asset.assignedUsers?.secondaryUser,
-        asset.assignedUsers?.custodian
-      ].filter(Boolean);
-      
-      for (const assignedUser of assignedUsers) {
-        const userIdd = assignedUser._id || assignedUser;
-        const user = await User.findById(userIdd);
-        if (user && user.adminId?.toString() === userId.toString()) {
-          return true;
-        }
-      }
-      
-      return false;
-    } else if (userRole === 'team') {
-      // Team member has access if they belong to the same admin AND
-      // they are personally linked to the asset
-      if (assetAdminId?.toString() !== adminId?.toString()) {
-        return false;
-      }
-      
-      // Check if team member is assigned or creator
-      return (
-        (asset.assignedUsers?.primaryUser?._id?.toString() === userId.toString() ||
-         asset.assignedUsers?.primaryUser?.toString() === userId.toString()) ||
-        (asset.assignedUsers?.secondaryUser?._id?.toString() === userId.toString() ||
-         asset.assignedUsers?.secondaryUser?.toString() === userId.toString()) ||
-        (asset.assignedUsers?.custodian?._id?.toString() === userId.toString() ||
-         asset.assignedUsers?.custodian?.toString() === userId.toString()) ||
-        (asset.createdBy?._id?.toString() === userId.toString() ||
-         asset.createdBy?.toString() === userId.toString())
-      );
-    }
-    
-    return false;
   }
 
   async checkUniqueFields(data, excludeId = null, adminId = null) {

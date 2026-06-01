@@ -11,11 +11,15 @@ class AssetController {
   getAssetList = asyncHandler(async (req, res) => {
     const { user, query } = req;
 
+    // For admin: user._id is the admin ID
+    // For team: user.adminId is the admin they belong to
+    const adminId = user.role === 'admin' ? user._id : user.adminId;
+
     const result = await AssetService.getAssets(
       query,
-      user._id,
-      user.role,
-      user.adminId
+      user._id,      // Current user's ID
+      user.role,     // User role (admin/team)
+      adminId        // Admin ID (for team members, this is their parent admin)
     );
 
     return sendResponse(res, 200, 'Assets fetched successfully', result);
@@ -29,10 +33,12 @@ class AssetController {
     const { id } = req.params;
     const { user } = req;
 
+    const adminId = user.role === 'admin' ? user._id : user.adminId;
+
     const asset = await AssetService.getAssetById(
       id,
       user.role,
-      user.adminId,
+      adminId,
       user._id
     );
 
@@ -49,9 +55,9 @@ class AssetController {
     // Determine adminId based on user role
     let adminId;
     if (user.role === 'admin') {
-      adminId = user._id;
+      adminId = user._id;  // Admin creates asset for themselves
     } else if (user.role === 'team') {
-      adminId = user.adminId;
+      adminId = user.adminId;  // Team creates asset for their admin
     }
 
     const asset = await AssetService.addAsset(
@@ -73,12 +79,14 @@ class AssetController {
     const { id } = req.params;
     const { user, body } = req;
 
+    const adminId = user.role === 'admin' ? user._id : user.adminId;
+
     const asset = await AssetService.updateAsset(
       id,
       body,
       user._id,
       user.role,
-      user.adminId
+      adminId
     );
 
     return sendResponse(res, 200, 'Asset updated successfully', asset);
@@ -112,13 +120,15 @@ class AssetController {
     const { user, body } = req;
     const { status, reason } = body;
 
+    const adminId = user.role === 'admin' ? user._id : user.adminId;
+
     const asset = await AssetService.updateAssetStatus(
       id,
       status,
       reason,
       user._id,
       user.role,
-      user.adminId
+      adminId
     );
 
     return sendResponse(res, 200, 'Asset status updated successfully', asset);
@@ -132,12 +142,14 @@ class AssetController {
     const { id } = req.params;
     const { user, body, ip, headers } = req;
 
+    const adminId = user.role === 'admin' ? user._id : user.adminId;
+
     const clonedAsset = await AssetService.cloneAsset(
       id,
       body,
       user._id,
       user.role,
-      user.adminId,
+      adminId,
       { ip, headers: { 'user-agent': headers['user-agent'] } }
     );
 
@@ -152,11 +164,13 @@ class AssetController {
     const { id } = req.params;
     const { user } = req;
 
+    const adminId = user.role === 'admin' ? user._id : user.adminId;
+
     const result = await AssetService.getCloneList(
       id,
       user._id,
       user.role,
-      user.adminId
+      adminId
     );
 
     return sendResponse(res, 200, 'Clone list fetched successfully', result);
