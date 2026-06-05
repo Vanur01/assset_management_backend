@@ -15,6 +15,7 @@ import roleRouter from "./role.routes.js"
 import departmentRouter from './department.routes.js'
 import locationRouter from './location.routes.js'
 import assetCategoryRouter from "./assetCategory.routes.js"
+import assetRequestRouter from './assetRequest.routes.js'
 
 const apiV1Router = express.Router();
 
@@ -35,6 +36,7 @@ apiV1Router.use("/role", roleRouter);
 apiV1Router.use("/department", departmentRouter);
 apiV1Router.use("/location", locationRouter);
 apiV1Router.use("/asset-category", assetCategoryRouter);
+apiV1Router.use("/asset-requests", assetRequestRouter);
 
 
 

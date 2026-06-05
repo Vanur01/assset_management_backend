@@ -1,4 +1,3 @@
-// src/services/asset.service.js
 import mongoose from 'mongoose';
 import Asset from '../models/asset.model.js';
 import AuditLog from '../models/auditLog.model.js';
@@ -15,6 +14,38 @@ class AssetService {
       return new mongoose.Types.ObjectId(id);
     }
     return id;
+  }
+
+  /**
+   * Get admin ID based on role
+   */
+  getAdminIdForRole(userId, userRole, providedAdminId = null) {
+    if (userRole === 'admin') {
+      return this.toObjectId(userId);
+    } else if (userRole === 'team') {
+      if (!providedAdminId) {
+        throw new ValidationError([{
+          field: 'adminId',
+          message: 'Admin ID is required for team members'
+        }]);
+      }
+      return this.toObjectId(providedAdminId);
+    }
+    throw new ForbiddenError('Invalid user role');
+  }
+
+  /**
+   * Get team member access filter
+   */
+  getTeamAccessFilter(userId) {
+    return {
+      $or: [
+        { 'assignedUsers.primaryUser': this.toObjectId(userId) },
+        { 'assignedUsers.secondaryUser': this.toObjectId(userId) },
+        { 'assignedUsers.custodian': this.toObjectId(userId) },
+        { createdBy: this.toObjectId(userId) }
+      ]
+    };
   }
 
   /**
@@ -38,18 +69,26 @@ class AssetService {
     }
   }
 
+  /**
+   * Add new asset
+   */
   async addAsset(assetData, adminId, userId, userRole = 'admin', req = null) {
-    if (!adminId) {
-      throw new ValidationError([{ field: 'adminId', message: 'Admin ID is required' }]);
+    // Validate admin ID
+    const resolvedAdminId = this.getAdminIdForRole(userId, userRole, adminId);
+    
+    if (!userId) {
+      throw new ValidationError([{ field: 'userId', message: 'User ID is required' }]);
     }
 
+    // Verify team member belongs to this admin
     if (userRole === 'team') {
       const user = await User.findById(this.toObjectId(userId));
-      if (!user || user.adminId?.toString() !== adminId.toString()) {
+      if (!user || user.adminId?.toString() !== resolvedAdminId.toString()) {
         throw new ForbiddenError('You are not authorized to add assets for this admin');
       }
     }
 
+    // Validate asset category if provided
     if (assetData.assetCategoryId) {
       const AssetCategory = mongoose.model('AssetCategory');
       if (AssetCategory) {
@@ -60,6 +99,7 @@ class AssetService {
       }
     }
 
+    // Check for duplicates
     const orConditions = [];
     if (assetData.assetId) orConditions.push({ assetId: assetData.assetId });
     if (assetData.serialNumber) orConditions.push({ serialNumber: assetData.serialNumber });
@@ -67,7 +107,7 @@ class AssetService {
 
     if (orConditions.length > 0) {
       const existingAsset = await Asset.findOne({
-        adminId: this.toObjectId(adminId),
+        adminId: resolvedAdminId,
         $or: orConditions,
         isDeleted: false
       });
@@ -81,9 +121,11 @@ class AssetService {
       }
     }
 
-    if (!assetData.assetId) assetData.assetId = await this.generateUniqueAssetId(adminId);
-    if (!assetData.tagNumber) assetData.tagNumber = await this.generateUniqueTagNumber(adminId);
+    // Generate unique identifiers if not provided
+    if (!assetData.assetId) assetData.assetId = await this.generateUniqueAssetId(resolvedAdminId);
+    if (!assetData.tagNumber) assetData.tagNumber = await this.generateUniqueTagNumber(resolvedAdminId);
 
+    // Status history
     const statusHistory = [{
       status: assetData.status || 'Active',
       changedAt: new Date(),
@@ -93,9 +135,10 @@ class AssetService {
 
     const createdByModel = userRole === 'team' ? 'Team' : 'Client';
 
+    // Create asset
     const asset = new Asset({
       ...assetData,
-      adminId: this.toObjectId(adminId),
+      adminId: resolvedAdminId,
       createdBy: this.toObjectId(userId),
       createdByModel,
       status: assetData.status || 'Active',
@@ -105,6 +148,7 @@ class AssetService {
 
     await asset.save();
 
+    // Create audit log
     await this.createAuditLog(
       'ASSET_CREATED',
       'asset',
@@ -122,6 +166,9 @@ class AssetService {
     return asset._doc;
   }
 
+  /**
+   * Get assets with filters and pagination
+   */
   async getAssets(query, userId, userRole, adminId = null) {
     const {
       page = 1,
@@ -139,36 +186,26 @@ class AssetService {
 
     const filter = { isDeleted: false };
 
-    // Role-based base filter
+    // ==========================
+    // ROLE BASED FILTERING
+    // ==========================
+
     if (userRole === 'admin') {
-      // For admin: adminId = userId (admin's own ID)
-      // Show assets where adminId matches the admin's ID
+      // Admin sees all assets under their adminId (their own userId)
       filter.adminId = this.toObjectId(userId);
-
-      // Also include assets created by team members under this admin
-      const teamMembers = await User.find({
-        adminId: this.toObjectId(userId),
-        role: 'team',
-        isDeleted: false
-      }).select('_id');
-
-      const teamMemberIds = teamMembers.map(member => member._id);
-
-      if (teamMemberIds.length > 0) {
-        filter.$or = [
-          { createdBy: { $in: teamMemberIds } } // Team members' created assets
-        ];
-      }
     } else if (userRole === 'team') {
-      // For team member: adminId comes from user.adminId (the admin they belong to)
-      // Show assets where adminId matches the admin they work for
+      // Team member must have adminId
       if (!adminId) {
-        throw new ValidationError([{ field: 'adminId', message: 'Admin ID is required for team members' }]);
+        throw new ValidationError([{
+          field: 'adminId',
+          message: 'Admin ID is required for team members'
+        }]);
       }
-
+      
+      // Team sees assets under their parent admin
       filter.adminId = this.toObjectId(adminId);
-
-      // Team members can only see assets where they are personally involved
+      
+      // Team only sees assets they are associated with
       filter.$or = [
         { 'assignedUsers.primaryUser': this.toObjectId(userId) },
         { 'assignedUsers.secondaryUser': this.toObjectId(userId) },
@@ -177,14 +214,22 @@ class AssetService {
       ];
     }
 
-    // Optional filters
+    // ==========================
+    // OPTIONAL FILTERS
+    // ==========================
+
     if (status) filter.status = status;
     if (assetCategoryId) filter.assetCategoryId = this.toObjectId(assetCategoryId);
     if (currentLocation) filter.currentLocation = currentLocation;
-    if (isClone !== undefined) filter.isClone = isClone === 'true';
-    if (clonedFrom) filter.clonedFrom = this.toObjectId(clonedFrom);
-
-    // Merge assignedTo filter with existing $or using $and
+    
+    if (isClone !== undefined) {
+      filter.isClone = isClone === 'true';
+    }
+    
+    if (clonedFrom) {
+      filter.clonedFrom = this.toObjectId(clonedFrom);
+    }
+    
     if (assignedTo) {
       const assignedToCondition = {
         $or: [
@@ -195,18 +240,26 @@ class AssetService {
       };
 
       if (filter.$or) {
-        filter.$and = [{ $or: filter.$or }, assignedToCondition];
+        filter.$and = [
+          { $or: filter.$or },
+          assignedToCondition
+        ];
         delete filter.$or;
       } else {
         filter.$or = assignedToCondition.$or;
       }
     }
 
-    // Text search
-    if (search) filter.$text = { $search: search };
+    if (search) {
+      filter.$text = { $search: search };
+    }
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const sortOptions = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
+
+    // ==========================
+    // ASSET LIST
+    // ==========================
 
     const [assets, total] = await Promise.all([
       Asset.find(filter)
@@ -223,7 +276,88 @@ class AssetService {
       Asset.countDocuments(filter)
     ]);
 
+    // ==========================
+    // STATS FILTER
+    // ==========================
+
+    const statsFilter = { ...filter };
+    delete statsFilter.$text;
+
+    const [
+      totalAssets,
+      activeAssets,
+      inactiveAssets,
+      clonedAssets,
+      nonClonedAssets,
+      assignedAssets,
+      unassignedAssets,
+      conditionStats,
+      locationStats,
+      valueStats
+    ] = await Promise.all([
+      Asset.countDocuments(statsFilter),
+      Asset.countDocuments({ ...statsFilter, status: 'Active' }),
+      Asset.countDocuments({ ...statsFilter, status: { $ne: 'Active' } }),
+      Asset.countDocuments({ ...statsFilter, isClone: true }),
+      Asset.countDocuments({ ...statsFilter, isClone: false }),
+      Asset.countDocuments({
+        ...statsFilter,
+        $or: [
+          { 'assignedUsers.primaryUser': { $exists: true, $ne: null } },
+          { 'assignedUsers.secondaryUser': { $exists: true, $ne: null } },
+          { 'assignedUsers.custodian': { $exists: true, $ne: null } }
+        ]
+      }),
+      Asset.countDocuments({
+        ...statsFilter,
+        'assignedUsers.primaryUser': null,
+        'assignedUsers.secondaryUser': null,
+        'assignedUsers.custodian': null
+      }),
+      Asset.aggregate([
+        { $match: statsFilter },
+        { $group: { _id: '$assetCondition', count: { $sum: 1 } } },
+        { $sort: { count: -1 } }
+      ]),
+      Asset.aggregate([
+        { $match: statsFilter },
+        { $group: { _id: '$currentLocation', count: { $sum: 1 } } },
+        { $sort: { count: -1 } }
+      ]),
+      Asset.aggregate([
+        { $match: statsFilter },
+        {
+          $group: {
+            _id: null,
+            totalPurchaseCost: { $sum: { $ifNull: ['$purchaseCost', 0] } },
+            totalCurrentValue: { $sum: { $ifNull: ['$currentValue', 0] } },
+            averagePurchaseCost: { $avg: { $ifNull: ['$purchaseCost', 0] } },
+            averageCurrentValue: { $avg: { $ifNull: ['$currentValue', 0] } }
+          }
+        }
+      ])
+    ]);
+
+    // ==========================
+    // RESPONSE
+    // ==========================
+
     return {
+      stats: {
+        totalAssets,
+        activeAssets,
+        inactiveAssets,
+        clonedAssets,
+        nonClonedAssets,
+        assignedAssets,
+        unassignedAssets,
+        totalPurchaseCost: valueStats?.[0]?.totalPurchaseCost || 0,
+        totalCurrentValue: valueStats?.[0]?.totalCurrentValue || 0,
+        averagePurchaseCost: valueStats?.[0]?.averagePurchaseCost || 0,
+        averageCurrentValue: valueStats?.[0]?.averageCurrentValue || 0,
+        conditionStats,
+        locationStats
+      },
       assets: assets.map(asset => this.formatAssetResponse(asset)),
       pagination: {
         page: parseInt(page),
@@ -234,13 +368,17 @@ class AssetService {
     };
   }
 
+  /**
+   * Get asset by ID
+   */
   async getAssetById(assetId, userRole, adminId, userId) {
-    // First, check if user has permission to view this asset
     const query = { _id: this.toObjectId(assetId), isDeleted: false };
 
     if (userRole === 'admin') {
+      // Admin can view any asset under their adminId
       query.adminId = this.toObjectId(userId);
     } else if (userRole === 'team') {
+      // Team member must be scoped to their parent admin's assets
       if (!adminId) {
         throw new ValidationError([{ field: 'adminId', message: 'Admin ID is required' }]);
       }
@@ -267,21 +405,24 @@ class AssetService {
     return this.formatAssetResponse(asset);
   }
 
+  /**
+   * Update asset
+   */
   async updateAsset(assetId, updateData, userId, userRole, adminId = null) {
     const asset = await Asset.findById(this.toObjectId(assetId));
     if (!asset) throw new NotFoundError('Asset not found');
 
-    // Check permissions
+    // Role-based authorization
     if (userRole === 'admin') {
       if (asset.adminId.toString() !== userId.toString()) {
         throw new ForbiddenError('You can only update assets belonging to your organization');
       }
     } else if (userRole === 'team') {
-      // Check if team member belongs to the asset's admin
-      if (asset.adminId.toString() !== adminId?.toString()) {
+      if (!adminId || asset.adminId.toString() !== adminId.toString()) {
         throw new ForbiddenError('You do not have permission to update this asset');
       }
 
+      // Team members cannot modify identity/ownership fields
       const restrictedFields = ['adminId', 'teamId', 'createdBy', 'assetId', 'tagNumber', 'serialNumber'];
       for (const field of restrictedFields) {
         if (updateData[field] !== undefined) {
@@ -294,6 +435,7 @@ class AssetService {
       }
     }
 
+    // Check unique fields if updating
     if (updateData.assetId || updateData.serialNumber || updateData.tagNumber) {
       await this.checkUniqueFields(updateData, assetId, asset.adminId);
     }
@@ -319,14 +461,19 @@ class AssetService {
     return await this.getAssetById(assetId, userRole, adminId, userId);
   }
 
+  /**
+   * Delete asset (soft delete) - Admin only
+   */
   async deleteAsset(assetId, userId, userRole, adminId = null, reason = '') {
     const asset = await Asset.findById(this.toObjectId(assetId));
     if (!asset) throw new NotFoundError('Asset not found');
 
+    // Only admins can delete assets
     if (userRole !== 'admin') {
       throw new ForbiddenError('Only admins can delete assets');
     }
 
+    // Admin can only delete their own organization's assets
     if (asset.adminId.toString() !== userId.toString()) {
       throw new ForbiddenError('You can only delete assets that belong to your organization');
     }
@@ -351,21 +498,25 @@ class AssetService {
     return { success: true, message: 'Asset deleted successfully' };
   }
 
+  /**
+   * Update asset status
+   */
   async updateAssetStatus(assetId, status, reason, userId, userRole, adminId = null) {
     const asset = await Asset.findById(this.toObjectId(assetId));
     if (!asset) throw new NotFoundError('Asset not found');
 
-    // Check permissions
+    // Role-based authorization
     if (userRole === 'admin') {
       if (asset.adminId.toString() !== userId.toString()) {
         throw new ForbiddenError('You can only update status for assets belonging to your organization');
       }
     } else if (userRole === 'team') {
-      if (asset.adminId.toString() !== adminId?.toString()) {
+      if (!adminId || asset.adminId.toString() !== adminId.toString()) {
         throw new ForbiddenError('You do not have permission to update this asset status');
       }
     }
 
+    // Validate status
     const validStatuses = ['Active', 'In Maintenance', 'Retired', 'Under Repair', 'Decommissioned'];
     if (!validStatuses.includes(status)) {
       throw new ValidationError([{
@@ -399,6 +550,9 @@ class AssetService {
     return await this.getAssetById(assetId, userRole, adminId, userId);
   }
 
+  /**
+   * Clone asset
+   */
   async cloneAsset(assetId, cloneData, userId, userRole, adminId = null, req = null) {
     const originalAsset = await Asset.findById(this.toObjectId(assetId));
     if (!originalAsset) throw new NotFoundError('Original asset not found');
@@ -407,13 +561,13 @@ class AssetService {
       throw new ForbiddenError('This asset cannot be cloned');
     }
 
-    // Check permissions for cloning
+    // Role-based authorization
     if (userRole === 'admin') {
       if (originalAsset.adminId.toString() !== userId.toString()) {
         throw new ForbiddenError('You can only clone assets belonging to your organization');
       }
     } else if (userRole === 'team') {
-      if (originalAsset.adminId.toString() !== adminId?.toString()) {
+      if (!adminId || originalAsset.adminId.toString() !== adminId.toString()) {
         throw new ForbiddenError('You do not have permission to clone this asset');
       }
     }
@@ -438,7 +592,6 @@ class AssetService {
     delete cloneObj.deletedBy;
 
     const createdByModel = userRole === 'team' ? 'Team' : 'Client';
-
     const resolvedAdminId = userRole === 'admin'
       ? this.toObjectId(userId)
       : this.toObjectId(adminId || originalAsset.adminId);
@@ -464,7 +617,7 @@ class AssetService {
     newAssetData.assetId = await this.generateUniqueAssetId(resolvedAdminId);
 
     if (cloneData.tagNumber) {
-      await this.checkUniqueFields({ tagNumber: cloneData.tagNumber }, null, newAssetData.adminId);
+      await this.checkUniqueFields({ tagNumber: cloneData.tagNumber }, null, resolvedAdminId);
       newAssetData.tagNumber = cloneData.tagNumber;
     } else {
       newAssetData.tagNumber = await this.generateUniqueTagNumber(resolvedAdminId);
@@ -489,41 +642,126 @@ class AssetService {
     return this.formatAssetResponse(clonedAsset.toObject());
   }
 
-  async getCloneList(assetId, userId, userRole, adminId = null) {
-    const originalAsset = await Asset.findById(this.toObjectId(assetId))
-      .lean({ virtuals: true });
+  /**
+   * Get all clones with filters
+   */
+  async getAllClonesWithFilters(userId, userRole, adminId = null, filters = {}) {
+    const {
+      page = 1,
+      limit = 10,
+      search = '',
+      status = '',
+      sortBy = 'createdAt',
+      sortOrder = 'desc',
+      originalAssetId = null
+    } = filters;
 
-    if (!originalAsset) throw new NotFoundError('Original asset not found');
+    const getId = (obj) => {
+      if (!obj) return null;
+      return obj._id?.toString() || obj.toString();
+    };
 
-    // Check permissions
+    let query = {
+      isClone: true,
+      isDeleted: false
+    };
+
+    // Role-based filtering
     if (userRole === 'admin') {
-      if (originalAsset.adminId?._id?.toString() !== userId.toString() &&
-        originalAsset.adminId?.toString() !== userId.toString()) {
-        throw new ForbiddenError('You do not have permission to view clones of this asset');
-      }
+      // Admin sees clones under their adminId
+      query.adminId = this.toObjectId(userId);
     } else if (userRole === 'team') {
-      if (originalAsset.adminId?._id?.toString() !== adminId?.toString() &&
-        originalAsset.adminId?.toString() !== adminId?.toString()) {
-        throw new ForbiddenError('You do not have permission to view clones of this asset');
+      // Team member must have adminId
+      if (!adminId) {
+        throw new ValidationError([{
+          field: 'adminId',
+          message: 'Admin ID is required for team members'
+        }]);
       }
+      
+      // Team sees clones under their parent admin
+      query.adminId = this.toObjectId(adminId);
+      
+      // Team only sees clones they are associated with
+      query.$or = [
+        { createdBy: this.toObjectId(userId) },
+        { 'assignedUsers.primaryUser': this.toObjectId(userId) },
+        { 'assignedUsers.secondaryUser': this.toObjectId(userId) },
+        { 'assignedUsers.custodian': this.toObjectId(userId) }
+      ];
     }
 
-    const clones = await Asset.find({
-      clonedFrom: this.toObjectId(assetId),
-      isDeleted: false
-    })
-      .populate('createdBy', 'name email firstName lastName')
-      .populate('adminId', 'name email customerName')
-      .sort({ cloneVersion: 1 })
-      .lean({ virtuals: true });
+    // Apply filters
+    if (originalAssetId) {
+      query.clonedFrom = this.toObjectId(originalAssetId);
+    }
+
+    if (search) {
+      query.$or = [
+        { assetId: { $regex: search, $options: 'i' } },
+        { assetName: { $regex: search, $options: 'i' } },
+        { tagNumber: { $regex: search, $options: 'i' } },
+        { description: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    if (status && status !== 'all') {
+      query.status = status;
+    }
+
+    // Pagination
+    const skip = (page - 1) * limit;
+    const sortOptions = {};
+    sortOptions[sortBy] = sortOrder === 'desc' ? -1 : 1;
+
+    // Execute queries
+    const [clones, totalClones] = await Promise.all([
+      Asset.find(query)
+        .populate('createdBy', 'name email firstName lastName')
+        .populate('adminId', 'name email customerName')
+        .populate('clonedFrom', 'assetId assetName name description status')
+        .sort(sortOptions)
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean({ virtuals: true }),
+      Asset.countDocuments(query)
+    ]);
+
+    // Format clones
+    const formattedClones = clones.map(clone => {
+      return {
+        ...this.formatAssetResponse(clone),
+        cloneInfo: {
+          version: clone.cloneVersion || 1,
+          clonedAt: clone.createdAt,
+          clonedBy: clone.createdBy ? {
+            id: getId(clone.createdBy),
+            name: clone.createdBy.name || clone.createdBy.email,
+            email: clone.createdBy.email
+          } : null
+        }
+      };
+    });
+
+    const totalPages = Math.ceil(totalClones / limit);
 
     return {
-      originalAsset: this.formatAssetResponse(originalAsset),
-      clones: clones.map(clone => this.formatAssetResponse(clone)),
-      totalClones: clones.length
+      success: true,
+      clones: formattedClones,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: totalClones,
+        pages: totalPages,
+        hasNext: page < totalPages,
+        hasPrev: page > 1
+      },
     };
   }
 
+  /**
+   * Check unique fields
+   */
   async checkUniqueFields(data, excludeId = null, adminId = null) {
     const fieldsToCheck = ['assetId', 'tagNumber', 'serialNumber'];
     const errors = [];
@@ -542,6 +780,9 @@ class AssetService {
     if (errors.length > 0) throw new ConflictError(errors[0].message);
   }
 
+  /**
+   * Generate unique asset ID
+   */
   async generateUniqueAssetId(adminId) {
     const prefix = 'AST';
     const timestamp = Date.now().toString().slice(-8);
@@ -554,6 +795,9 @@ class AssetService {
     return assetId;
   }
 
+  /**
+   * Generate unique tag number
+   */
   async generateUniqueTagNumber(adminId) {
     const prefix = 'TAG';
     const timestamp = Date.now().toString().slice(-8);
@@ -566,6 +810,9 @@ class AssetService {
     return tagNumber;
   }
 
+  /**
+   * Format asset response
+   */
   formatAssetResponse(asset) {
     if (!asset) return null;
 

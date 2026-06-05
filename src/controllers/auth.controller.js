@@ -1,20 +1,20 @@
+// controllers/auth.controller.js
 import AuthService from '../services/auth.service.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { sendResponse } from '../utils/response.js';
 
 class AuthController {
   registersuper_admin = asyncHandler(async (req, res) => {
-    const result = await AuthService.registersuper_admin(req.body);
+    const result = await AuthService.registersuper_admin(req.body, req);
     return sendResponse(res, 201, 'Super admin account created successfully', result);
   });
 
   login = asyncHandler(async (req, res) => {
-    const { ip, headers } = req;
-    const result = await AuthService.login(req.body, ip, headers['user-agent']);
+    const result = await AuthService.login(req.body, req);
 
     res.cookie('refreshToken', result.refreshToken, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
+      secure: process.env.NODE_ENV === 'development',
       sameSite: 'strict',
       maxAge: 30 * 24 * 60 * 60 * 1000
     });
@@ -26,7 +26,7 @@ class AuthController {
   });
 
   logout = asyncHandler(async (req, res) => {
-    await AuthService.logout(req.user._id);
+    await AuthService.logout(req.user._id, req);
     res.clearCookie('refreshToken');
     return sendResponse(res, 200, 'Logged out successfully');
   });
@@ -38,20 +38,20 @@ class AuthController {
 
   changePassword = asyncHandler(async (req, res) => {
     const { currentPassword, newPassword } = req.body;
-    await AuthService.changePassword(req.user._id, currentPassword, newPassword);
+    await AuthService.changePassword(req.user._id, currentPassword, newPassword, req);
     res.clearCookie('refreshToken');
     return sendResponse(res, 200, 'Password changed successfully. Please login again.');
   });
 
   forgotPassword = asyncHandler(async (req, res) => {
     const { email } = req.body;
-    const result = await AuthService.forgotPassword(email);
+    const result = await AuthService.forgotPassword(email, req);
     return sendResponse(res, 200, result.message);
   });
 
   resetPassword = asyncHandler(async (req, res) => {
     const { token, newPassword } = req.body;
-    const result = await AuthService.resetPassword(token, newPassword);
+    const result = await AuthService.resetPassword(token, newPassword, req);
     return sendResponse(res, 200, result.message);
   });
 

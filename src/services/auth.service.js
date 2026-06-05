@@ -1,14 +1,12 @@
+// services/auth.service.js (updated with proper audit logging)
 import User from '../models/user.model.js';
 import AuditLog from '../models/auditLog.model.js';
 import crypto from 'crypto';
 import EmailService from './email.service.js';
 import { AuthenticationError, ValidationError, NotFoundError, ConflictError } from '../errors/customError.js';
 
-
-
-
 class AuthService {
-  async registersuper_admin(data) {
+  async registersuper_admin(data, req = null) {
     const existingUser = await User.findOne({ email: data.email });
     if (existingUser) throw new ConflictError('Email already registered');
 
@@ -27,19 +25,23 @@ class AuthService {
     super_admin.refreshToken = refreshToken;
     await super_admin.save();
 
+    // Create audit log with request data if available
     await AuditLog.create({
       action: 'CREATE',
       resource: 'user',
       resourceId: super_admin._id,
       actor: super_admin._id,
       actorRole: 'super_admin',
-      description: 'Super admin account created'
+      description: 'Super admin account created',
+      ipAddress: req?.ip || req?.headers?.['x-forwarded-for'] || 'system',
+      userAgent: req?.headers?.['user-agent'] || 'system',
+      metadata: { registrationMethod: 'direct' }
     });
 
     return { user: this.formatUserResponse(super_admin), accessToken, refreshToken };
   }
 
-  async login({ email, password }, ipAddress, userAgent) {
+  async login({ email, password }, req = null) {
     const user = await User.findOne({ email }).select('+password');
     if (!user) throw new AuthenticationError('Invalid email or password');
     if (user.isDeleted) throw new AuthenticationError('Account not found');
@@ -63,15 +65,16 @@ class AuthService {
       resourceId: user._id,
       actor: user._id,
       actorRole: user.role,
-      ipAddress,
-      userAgent,
-      description: `User logged in successfully`
+      description: `User logged in successfully`,
+      ipAddress: req?.ip || req?.headers?.['x-forwarded-for'],
+      userAgent: req?.headers?.['user-agent'],
+      metadata: { loginMethod: 'password' }
     });
 
     return { accessToken, refreshToken, user: this.formatUserResponse(user) };
   }
 
-  async forgotPassword(email) {
+  async forgotPassword(email, req = null) {
     const user = await User.findOne({ email, isDeleted: false });
     if (!user) {
       return {
@@ -91,7 +94,10 @@ class AuthService {
       resourceId: user._id,
       actor: user._id,
       actorRole: user.role,
-      description: 'Password reset requested'
+      description: 'Password reset requested',
+      ipAddress: req?.ip || req?.headers?.['x-forwarded-for'],
+      userAgent: req?.headers?.['user-agent'],
+      metadata: { resetTokenSent: true }
     });
 
     return {
@@ -100,7 +106,7 @@ class AuthService {
     };
   }
 
-  async resetPassword(token, newPassword) {
+  async resetPassword(token, newPassword, req = null) {
     const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
 
     const user = await User.findOne({
@@ -112,6 +118,7 @@ class AuthService {
       throw new ValidationError([{ field: 'token', message: 'Password reset token is invalid or has expired' }]);
     }
 
+    const oldPasswordHash = user.password;
     user.password = newPassword;
     user.passwordResetToken = undefined;
     user.passwordResetExpires = undefined;
@@ -123,14 +130,24 @@ class AuthService {
       resourceId: user._id,
       actor: user._id,
       actorRole: user.role,
-      description: 'Password reset successfully'
+      description: 'Password reset successfully completed',
+      ipAddress: req?.ip || req?.headers?.['x-forwarded-for'],
+      userAgent: req?.headers?.['user-agent'],
+      changes: {
+        old: { passwordChanged: true },
+        new: { passwordReset: true }
+      },
+      metadata: { resetMethod: 'token' }
     });
 
     return { success: true, message: 'Password has been reset successfully.' };
   }
 
-  async logout(userId) {
-    const user = await User.findByIdAndUpdate(userId, { $unset: { refreshToken: 1, token: 1 } });
+  async logout(userId, req = null) {
+    const user = await User.findById(userId);
+    if (!user) throw new NotFoundError('User not found');
+
+    await User.findByIdAndUpdate(userId, { $unset: { refreshToken: 1, token: 1 } });
 
     await AuditLog.create({
       action: 'LOGOUT',
@@ -138,7 +155,9 @@ class AuthService {
       resourceId: userId,
       actor: userId,
       actorRole: user.role,
-      description: 'User logged out'
+      description: 'User logged out',
+      ipAddress: req?.ip || req?.headers?.['x-forwarded-for'],
+      userAgent: req?.headers?.['user-agent']
     });
 
     return true;
@@ -150,7 +169,7 @@ class AuthService {
     return this.formatUserResponse(user);
   }
 
-  async changePassword(userId, currentPassword, newPassword) {
+  async changePassword(userId, currentPassword, newPassword, req = null) {
     const user = await User.findById(userId).select('+password');
     if (!user) throw new NotFoundError('User not found');
 
@@ -159,6 +178,7 @@ class AuthService {
       throw new ValidationError([{ field: 'currentPassword', message: 'Current password is incorrect' }]);
     }
 
+    const oldPasswordHash = user.password;
     user.password = newPassword;
     user.refreshToken = undefined;
     await user.save();
@@ -169,7 +189,14 @@ class AuthService {
       resourceId: userId,
       actor: userId,
       actorRole: user.role,
-      description: 'Password changed by user'
+      description: 'Password changed by user',
+      ipAddress: req?.ip || req?.headers?.['x-forwarded-for'],
+      userAgent: req?.headers?.['user-agent'],
+      changes: {
+        old: { passwordChanged: true },
+        new: { passwordUpdated: true }
+      },
+      metadata: { changeMethod: 'manual' }
     });
 
     return true;
