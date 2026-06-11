@@ -42,6 +42,7 @@ class AuthService {
   }
 
   async login({ email, password }, req = null) {
+    
     const user = await User.findOne({ email }).select('+password');
     if (!user) throw new AuthenticationError('Invalid email or password');
     if (user.isDeleted) throw new AuthenticationError('Account not found');

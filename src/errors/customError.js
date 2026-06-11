@@ -1,5 +1,3 @@
-// errors/customError.js
-
 /**
  * Base Application Error Class
  * All custom errors should extend this class
@@ -18,9 +16,8 @@ export class AppError extends Error {
  * Used for invalid input data, missing required fields, etc.
  */
 export class ValidationError extends AppError {
-  constructor(errors) {
-    super('Validation Error', 400);
-    this.errors = Array.isArray(errors) ? errors : [errors];
+  constructor(message) {
+    super(message || 'Validation Error', 400);
   }
 }
 
@@ -37,19 +34,18 @@ export class AuthenticationError extends AppError {
 /**
  * Authorization Error - 403 Forbidden
  * Used when user is authenticated but doesn't have permission
- * Alias: ForbiddenError for consistency
  */
 export class AuthorizationError extends AppError {
-  constructor(message = 'Not authorized', statusCode = 403) {
-    super(message, statusCode);
+  constructor(message = 'Not authorized') {
+    super(message, 403);
   }
 }
 
 /**
  * Forbidden Error - 403 Forbidden
- * Alias for AuthorizationError - more semantic naming
+ * Used for permission-related errors
  */
-export class ForbiddenError extends AuthorizationError {
+export class ForbiddenError extends AppError {
   constructor(message = 'Access forbidden. You do not have permission to perform this action.') {
     super(message, 403);
   }
@@ -67,42 +63,11 @@ export class NotFoundError extends AppError {
 
 /**
  * Conflict Error - 409 Conflict
- * Used when there's a conflict with existing data (e.g., duplicate email)
+ * Used when there's a conflict with existing data
  */
 export class ConflictError extends AppError {
   constructor(message = 'Resource already exists') {
     super(message, 409);
-  }
-}
-
-/**
- * Rate Limit Error - 429 Too Many Requests
- * Used when user exceeds rate limits
- */
-export class RateLimitError extends AppError {
-  constructor(message = 'Too many requests', retryAfter = 60) {
-    super(message, 429);
-    this.retryAfter = retryAfter;
-  }
-}
-
-/**
- * Internal Server Error - 500 Internal Server Error
- * Used for unexpected server errors
- */
-export class InternalServerError extends AppError {
-  constructor(message = 'Internal server error') {
-    super(message, 500);
-  }
-}
-
-/**
- * Service Unavailable Error - 503 Service Unavailable
- * Used when service is temporarily unavailable
- */
-export class ServiceUnavailableError extends AppError {
-  constructor(message = 'Service temporarily unavailable') {
-    super(message, 503);
   }
 }
 
@@ -117,32 +82,12 @@ export class BadRequestError extends AppError {
 }
 
 /**
- * Subscription Expired Error - 403 Forbidden
- * Used when user's subscription has expired
+ * Internal Server Error - 500 Internal Server Error
+ * Used for unexpected server errors
  */
-export class SubscriptionExpiredError extends AppError {
-  constructor(message = 'Subscription has expired. Please renew to continue.') {
-    super(message, 403);
-  }
-}
-
-/**
- * License Limit Exceeded Error - 403 Forbidden
- * Used when user exceeds their license limit
- */
-export class LicenseLimitExceededError extends AppError {
-  constructor(message = 'License limit exceeded. Please upgrade your plan.') {
-    super(message, 403);
-  }
-}
-
-/**
- * Account Inactive Error - 403 Forbidden
- * Used when user account is inactive
- */
-export class AccountInactiveError extends AppError {
-  constructor(message = 'Account is inactive. Please contact support.') {
-    super(message, 403);
+export class InternalServerError extends AppError {
+  constructor(message = 'Internal server error') {
+    super(message, 500);
   }
 }
 
@@ -167,23 +112,12 @@ export class InvalidTokenError extends AppError {
 }
 
 /**
- * File Upload Error - 400 Bad Request
- * Used for file upload related errors
- */
-export class FileUploadError extends AppError {
-  constructor(message = 'File upload failed') {
-    super(message, 400);
-  }
-}
-
-/**
  * Database Error - 500 Internal Server Error
  * Used for database related errors
  */
 export class DatabaseError extends AppError {
-  constructor(message = 'Database operation failed', originalError = null) {
+  constructor(message = 'Database operation failed') {
     super(message, 500);
-    this.originalError = originalError;
   }
 }
 
@@ -198,46 +132,6 @@ export class DuplicateEntryError extends ConflictError {
   }
 }
 
-/**
- * Invalid Operation Error - 400 Bad Request
- * Used when an operation is invalid in the current state
- */
-export class InvalidOperationError extends BadRequestError {
-  constructor(message = 'Invalid operation') {
-    super(message);
-  }
-}
-
-/**
- * Resource Locked Error - 423 Locked
- * Used when a resource is locked and cannot be modified
- */
-export class ResourceLockedError extends AppError {
-  constructor(message = 'Resource is locked') {
-    super(message, 423);
-  }
-}
-
-/**
- * Dependency Error - 424 Failed Dependency
- * Used when a dependency fails
- */
-export class DependencyError extends AppError {
-  constructor(message = 'Dependency failed') {
-    super(message, 424);
-  }
-}
-
-/**
- * Too Many Requests Error - 429 Too Many Requests
- * Alias for RateLimitError
- */
-export class TooManyRequestsError extends RateLimitError {
-  constructor(message = 'Too many requests', retryAfter = 60) {
-    super(message, retryAfter);
-  }
-}
-
 // Default export for convenience
 export default {
   AppError,
@@ -247,20 +141,10 @@ export default {
   ForbiddenError,
   NotFoundError,
   ConflictError,
-  RateLimitError,
-  InternalServerError,
-  ServiceUnavailableError,
   BadRequestError,
-  SubscriptionExpiredError,
-  LicenseLimitExceededError,
-  AccountInactiveError,
+  InternalServerError,
   TokenExpiredError,
   InvalidTokenError,
-  FileUploadError,
   DatabaseError,
-  DuplicateEntryError,
-  InvalidOperationError,
-  ResourceLockedError,
-  DependencyError,
-  TooManyRequestsError
+  DuplicateEntryError
 };

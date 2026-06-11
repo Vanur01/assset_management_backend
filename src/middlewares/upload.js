@@ -13,7 +13,10 @@ if (!fs.existsSync(uploadRoot)) {
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     let folder = 'checklists';
-    if (file.mimetype.includes('spreadsheet') || file.mimetype.includes('excel')) {
+    // Check for Excel/Spreadsheet files
+    if (file.mimetype.includes('spreadsheet') || 
+        file.mimetype.includes('excel') ||
+        file.originalname.match(/\.(xlsx|xls|csv)$/i)) {
       folder = 'imports';
     }
     const fullPath = path.join(uploadRoot, folder);
@@ -34,18 +37,34 @@ const fileFilter = (req, file, cb) => {
     'application/vnd.ms-excel',
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     'text/csv',
-    "application/pdf",
+    'application/pdf',
     "image/png",
     "image/jpeg",
     "image/jpg",
     "image/webp",
-
   ];
   
-  if (allowedMimeTypes.includes(file.mimetype)) {
-    cb(null, true);
+  // For Excel imports specifically, we want to validate
+  if (req.originalUrl.includes('/import-excel')) {
+    // Strict validation for Excel imports
+    const excelMimeTypes = [
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'text/csv',
+    ];
+    
+    if (excelMimeTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`Invalid file type. Only Excel files (.xlsx, .xls, .csv) are allowed for import. Received: ${file.mimetype}`), false);
+    }
   } else {
-    cb(new Error(`Invalid file type. Only Excel files allowed. Received: ${file.mimetype}`), false);
+    // For other uploads (checklist attachments, etc.)
+    if (allowedMimeTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`Invalid file type. Allowed types: ${allowedMimeTypes.join(', ')}`), false);
+    }
   }
 };
 

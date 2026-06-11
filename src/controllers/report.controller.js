@@ -1,312 +1,109 @@
-// controllers/report.controller.js - Unified Role-Based Report Controller
+// controllers/report.controller.js
 import ReportService from '../services/report.service.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { sendResponse } from '../utils/response.js';
 
-/**
- * Role-Based Report Access Matrix:
- *
- * SUPER ADMIN:
- *   GET  /api/reports/clients        → generateClientReport
- *   GET  /api/reports/assets         → generateAssetReport (all assets)
- *   GET  /api/reports/team           → generateTeamReport (all teams)
- *   GET  /api/reports/checklists     → generateChecklistReport (all)
- *   GET  /api/reports/assignments    → generateAssignmentReport (all)
- *   GET  /api/reports/inspections    → generateInspectionReport (all)
- *   GET  /api/reports/revenue        → generateRevenueReport (exclusive)
- *   GET  /api/reports/analytics/dashboard → getDashboardAnalytics (platform-wide)
- *   GET  /api/reports/analytics/kpi       → getKPISummary (platform KPIs)
- *   POST /api/reports/export/bulk         → exportBulkReports
- *   POST /api/reports/schedule            → scheduleReport
- *
- * ADMIN:
- *   GET  /api/reports/assets         → generateAssetReport (own assets only)
- *   GET  /api/reports/team           → generateTeamReport (own team only)
- *   GET  /api/reports/checklists     → generateChecklistReport (own checklists)
- *   GET  /api/reports/assignments    → generateAssignmentReport (own assignments)
- *   GET  /api/reports/inspections    → generateInspectionReport (own inspections)
- *   GET  /api/reports/compliance     → generateComplianceReport
- *   GET  /api/reports/analytics/dashboard → getDashboardAnalytics (org-level)
- *   GET  /api/reports/analytics/kpi       → getKPISummary (org KPIs)
- *   POST /api/reports/export/bulk         → exportBulkReports (own data)
- *   POST /api/reports/schedule            → scheduleReport
- */
-
 class ReportController {
 
-  // ==================== SAFE STRINGIFY ====================
-
-  safeStringifyReport(report) {
-    return JSON.parse(JSON.stringify(report, (key, value) => {
-      if (['_workbook', '_worksheets', '_workbookRef', '_workbookView', '_worksheetsView', '_workbookRela'].includes(key)) {
-        return undefined;
-      }
-      if (value instanceof Date) return value.toISOString();
-      return value;
-    }));
-  }
-
-  // ==================== SEND REPORT RESPONSE ====================
-
   /**
-   * Handles sending a report response in JSON, Excel or PDF format.
+   * Generate report based on role and type
+   * GET /api/reports/:reportType
    */
-  sendReportResponse(res, result, filePrefix, message) {
-    // Excel buffer
-    if (Buffer.isBuffer(result) && result[0] === 0x50 && result[1] === 0x4B) {
-      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition', `attachment; filename=${filePrefix}_${Date.now()}.xlsx`);
-      return res.send(result);
+  generateReport = asyncHandler(async (req, res) => {
+    const { userRole, userId } = req;
+    const { reportType } = req.params;
+    const filters = req.query;
+
+    if (!userRole) {
+      return sendResponse(res, 401, 'Unauthorized: role not found', null);
     }
 
-    // PDF buffer
-    if (Buffer.isBuffer(result) && result[0] === 0x25 && result[1] === 0x50) {
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename=${filePrefix}_${Date.now()}.pdf`);
-      return res.send(result);
-    }
-
-    // JSON
-    const safeReport = this.safeStringifyReport(result);
-    return sendResponse(res, 200, message, safeReport);
-  }
-
-  // ==================== CLIENT REPORT (Super Admin only) ====================
-
-  /**
-   * GET /api/reports/clients
-   * Super Admin: all clients | Admin: own profile only
-   */
-  generateClientReport = asyncHandler(async (req, res) => {
-    const result = await ReportService.generateClientReport(
-      req.userId,
-      req.userRole,
-      req.query
-    );
-    return this.sendReportResponse(res, result, 'client_report', 'Client report generated successfully');
-  });
-
-  // ==================== ASSET REPORT (Super Admin: all, Admin: own) ====================
-
-  /**
-   * GET /api/reports/assets
-   * Super Admin: all assets globally | Admin: own org assets
-   */
-  generateAssetReport = asyncHandler(async (req, res) => {
-    const result = await ReportService.generateAssetReport(
-      req.userId,
-      req.userRole,
-      req.query
-    );
-    return this.sendReportResponse(res, result, 'asset_report', 'Asset report generated successfully');
-  });
-
-  // ==================== TEAM REPORT (Super Admin: all, Admin: own) ====================
-
-  /**
-   * GET /api/reports/team
-   * Super Admin: all team members globally | Admin: own team
-   */
-  generateTeamReport = asyncHandler(async (req, res) => {
-    const result = await ReportService.generateTeamReport(
-      req.userId,
-      req.userRole,
-      req.query
-    );
-    return this.sendReportResponse(res, result, 'team_report', 'Team performance report generated successfully');
-  });
-
-  // ==================== CHECKLIST REPORT (Super Admin: all, Admin: own + global) ====================
-
-  /**
-   * GET /api/reports/checklists
-   * Super Admin: all checklists | Admin: own + global checklists
-   */
-  generateChecklistReport = asyncHandler(async (req, res) => {
-    const result = await ReportService.generateChecklistReport(
-      req.userId,
-      req.userRole,
-      req.query
-    );
-    return this.sendReportResponse(res, result, 'checklist_report', 'Checklist report generated successfully');
-  });
-
-  // ==================== ASSIGNMENT REPORT (Super Admin: all, Admin: own) ====================
-
-  /**
-   * GET /api/reports/assignments
-   * Super Admin: all assignments | Admin: own org assignments
-   */
-  generateAssignmentReport = asyncHandler(async (req, res) => {
-    const result = await ReportService.generateAssignmentReport(
-      req.userId,
-      req.userRole,
-      req.query
-    );
-    return this.sendReportResponse(res, result, 'assignment_report', 'Assignment report generated successfully');
-  });
-
-  // ==================== INSPECTION REPORT (Super Admin: all, Admin: own) ====================
-
-  /**
-   * GET /api/reports/inspections
-   * Super Admin: all inspections | Admin: own org inspections
-   */
-  generateInspectionReport = asyncHandler(async (req, res) => {
-    const result = await ReportService.generateInspectionReport(
-      req.userId,
-      req.userRole,
-      req.query
-    );
-    return this.sendReportResponse(res, result, 'inspection_report', 'Inspection report generated successfully');
-  });
-
-  // ==================== REVENUE REPORT (Super Admin only) ====================
-
-  /**
-   * GET /api/reports/revenue
-   * Super Admin ONLY - platform-wide revenue analytics
-   */
-  generateRevenueReport = asyncHandler(async (req, res) => {
-    const isSuperAdmin = req.userRole === 'super_admin' || req.userRole === 'superadmin';
-    if (!isSuperAdmin) {
-      return sendResponse(res, 403, 'Access denied: Revenue reports are only available to super admins', null);
-    }
-
-    const result = await ReportService.generateRevenueReport(
-      req.userId,
-      req.userRole,
-      req.query
-    );
-    return this.sendReportResponse(res, result, 'revenue_report', 'Revenue report generated successfully');
-  });
-
-  // ==================== COMPLIANCE REPORT (Admin + Super Admin) ====================
-
-  /**
-   * GET /api/reports/compliance
-   * Admin: own org compliance | Super Admin: global compliance
-   */
-  generateComplianceReport = asyncHandler(async (req, res) => {
-    const result = await ReportService.generateComplianceReport(
-      req.userId,
-      req.userRole,
-      req.query
-    );
-    return this.sendReportResponse(res, result, 'compliance_report', 'Compliance report generated successfully');
-  });
-
-  // ==================== DASHBOARD ANALYTICS ====================
-
-  /**
-   * GET /api/reports/analytics/dashboard
-   * Super Admin: platform-wide analytics
-   * Admin: org-level analytics
-   */
-  getDashboardAnalytics = asyncHandler(async (req, res) => {
-    const analytics = await ReportService.getDashboardAnalytics(
-      req.userId,
-      req.userRole,
-      req.query
-    );
-    return sendResponse(res, 200, 'Dashboard analytics fetched successfully', analytics);
-  });
-
-  // ==================== KPI SUMMARY ====================
-
-  /**
-   * GET /api/reports/analytics/kpi
-   * Super Admin: platform KPIs (clients, revenue, assets, assignments, checklists)
-   * Admin: org KPIs (team, assets, assignments, checklists)
-   */
-  getKPISummary = asyncHandler(async (req, res) => {
-    const kpiData = await ReportService.getKPISummary(
-      req.userId,
-      req.userRole,
-      req.query
-    );
-    return sendResponse(res, 200, 'KPI summary fetched successfully', kpiData);
-  });
-
-  // ==================== BULK EXPORT ====================
-
-  /**
-   * POST /api/reports/export/bulk
-   * Body: { reportTypes: ['clients','assets','team','checklists','assignments','inspections','revenue','compliance'], dateRange: {}, format: 'excel' }
-   *
-   * Super Admin can include: clients, assets, team, checklists, assignments, inspections, revenue, compliance
-   * Admin can include: assets, team, checklists, assignments, inspections, compliance
-   */
-  exportBulkReports = asyncHandler(async (req, res) => {
-    const { format = 'excel' } = req.body;
-
-    const result = await ReportService.exportBulkReports(
-      req.userId,
-      req.userRole,
-      req.body
-    );
-
-    if (format === 'excel' && Buffer.isBuffer(result)) {
-      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition', `attachment; filename=bulk_reports_${Date.now()}.xlsx`);
-      return res.send(result);
-    }
-
-    const safeReports = JSON.parse(JSON.stringify(result, (key, value) => {
-      if (['_workbook', '_worksheets', '_workbookRef'].includes(key)) return undefined;
-      return value;
-    }));
-
-    return sendResponse(res, 200, 'Bulk reports generated successfully', safeReports);
-  });
-
-  // ==================== SCHEDULE REPORT ====================
-
-  /**
-   * POST /api/reports/schedule
-   * Body: { reportType, schedule: { frequency: 'daily'|'weekly'|'monthly', time: 'HH:MM' }, recipients: [], format }
-   */
-  scheduleReport = asyncHandler(async (req, res) => {
-    const { reportType, schedule, recipients, format } = req.body;
-
-    // Validate that admin isn't trying to schedule super-admin-only reports
-    const isSuperAdmin = req.userRole === 'super_admin' || req.userRole === 'superadmin';
-    const superAdminOnlyReports = ['clients', 'revenue'];
-
-    if (!isSuperAdmin && superAdminOnlyReports.includes(reportType)) {
-      return sendResponse(res, 403, `Access denied: '${reportType}' reports can only be scheduled by super admins`, null);
-    }
-
-    const scheduledReport = {
-      id: `SR-${Date.now()}`,
-      reportType,
-      schedule,
-      recipients,
-      format,
-      createdBy: req.userId,
-      createdByRole: req.userRole,
-      createdAt: new Date(),
-      nextRun: this.calculateNextRun(schedule),
-      status: 'scheduled',
+    // Validate report type access based on role
+    const allowedReports = {
+      super_admin: [
+        'clients', 'financial', 'checklists', 'assignments',
+        'audit-logs', 'contact-inquiries', 'individual-client'
+      ],
+      admin: [
+        'team-members', 'checklists', 'assignments', 'audit-logs',
+        'assets', 'individual-team'
+      ],
+      team: ['assignments', 'audit-logs']
     };
 
-    return sendResponse(res, 201, 'Report scheduled successfully', scheduledReport);
+    if (!allowedReports[userRole]?.includes(reportType)) {
+      return sendResponse(res, 403, `Unauthorized: ${userRole} cannot access ${reportType} report`, null);
+    }
+
+    const result = await ReportService.generateReport(userRole, userId, reportType, filters);
+
+    if (!result.success) {
+      return sendResponse(res, 500, result.error || 'Failed to generate report', null);
+    }
+
+    return sendResponse(res, 200, 'Report generated successfully', result.data);
   });
 
-  // ==================== HELPER METHODS ====================
+  /**
+   * Export report as CSV
+   * GET /api/reports/:reportType/export
+   */
+  exportReport = asyncHandler(async (req, res) => {
+    const { userRole, userId } = req;
+    const { reportType } = req.params;
+    const filters = req.query;
 
-  calculateNextRun(schedule) {
-    const now = new Date();
-    switch (schedule?.frequency) {
-      case 'daily':   now.setDate(now.getDate() + 1); break;
-      case 'weekly':  now.setDate(now.getDate() + 7); break;
-      case 'monthly': now.setMonth(now.getMonth() + 1); break;
-      default:        now.setDate(now.getDate() + 1);
+    const result = await ReportService.generateReport(userRole, userId, reportType, filters);
+
+    if (!result.success) {
+      return sendResponse(res, 500, result.error || 'Failed to generate report', null);
     }
-    const [hours = 9, minutes = 0] = (schedule?.time || '09:00').split(':').map(Number);
-    now.setHours(hours, minutes, 0, 0);
-    return now;
-  }
+
+    const csv = this.convertToCSV(result.data, reportType);
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename=${reportType}_report_${Date.now()}.csv`);
+    res.send(csv);
+  });
+
+  convertToCSV = (data, reportType) => {
+    if (!data) return '';
+
+    let headers = [];
+    let rows = [];
+
+    if (data.clients) {
+      headers = ['ID', 'Name', 'Email', 'Status', 'Membership Plan', 'Team Members', 'Total Assignments', 'Completion Rate'];
+      rows = data.clients.map(c => [c.id, c.name, c.email, c.status, c.membershipPlan, c.teamMembers, c.totalAssignments, c.completionRate]);
+    } else if (data.teamMembers) {
+      headers = ['ID', 'Name', 'Email', 'Status', 'Total Assignments', 'Completed', 'Completion Rate', 'Quality Score'];
+      rows = data.teamMembers.map(m => [m.id, m.name, m.email, m.status, m.totalAssignments, m.completedAssignments, m.completionRate, m.qualityScore]);
+    } else if (data.assignments) {
+      headers = ['ID', 'Customer', 'Due Date', 'Status', 'Priority', 'Checklists', 'Is Overdue'];
+      rows = data.assignments.map(a => [a.id, a.customer, a.dueDate, a.status, a.priority, a.checklists.join('; '), a.isOverdue]);
+    } else if (data.logs) {
+      headers = ['ID', 'Action', 'Resource', 'Actor', 'Description', 'Status', 'Timestamp'];
+      rows = data.logs.map(l => [l.id, l.action, l.resource, l.actor?.name || 'System', l.description, l.status, l.timestamp]);
+    } else if (data.assets) {
+      headers = ['ID', 'Asset Name', 'Tag Number', 'Type', 'Status', 'Location', 'Current Value'];
+      rows = data.assets.map(a => [a.id, a.assetName, a.tagNumber, a.type, a.status, a.currentLocation, a.currentValue]);
+    } else if (data.inquiries) {
+      headers = ['ID', 'Full Name', 'Email', 'Phone', 'Message', 'Submitted At'];
+      rows = data.inquiries.map(i => [i.id, i.fullName, i.email, i.phone, i.message, i.submittedAt]);
+    } else if (data.checklists) {
+      headers = ['ID', 'Name', 'Category', 'Status', 'Version', 'Total Fields', 'Total Assignments', 'Completion Rate'];
+      rows = data.checklists.map(c => [c.id, c.name, c.category, c.status, c.version, c.totalFields, c.usageStats?.totalAssignments, c.usageStats?.completionRate]);
+    } else if (data.clientInfo) {
+      headers = ['Field', 'Value'];
+      rows = Object.entries(data.clientInfo).map(([key, value]) => [key, value]);
+    } else if (data.teamInfo) {
+      headers = ['Field', 'Value'];
+      rows = Object.entries(data.teamInfo).map(([key, value]) => [key, value]);
+    }
+
+    const csvRows = [headers.join(','), ...rows.map(row => row.map(cell => `"${cell}"`).join(','))];
+    return csvRows.join('\n');
+  };
 }
 
 export default new ReportController();

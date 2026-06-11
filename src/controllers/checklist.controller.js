@@ -1,153 +1,116 @@
-import checklistService from '../services/checklist.service.js';
-import { asyncHandler }  from '../utils/asyncHandler.js';
-import { sendResponse }  from '../utils/response.js';
-import { ValidationError } from '../errors/customError.js';
+import { sendResponse } from '../utils/response.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
+import ChecklistService from '../services/checklist.service.js';
+import { BadRequestError } from '../errors/customError.js';
 
 class ChecklistController {
-
-  // ==================== CHECKLIST CRUD ====================
-
+  // ==================== CREATE ====================
   createChecklist = asyncHandler(async (req, res) => {
-    const result = await checklistService.createChecklist(
-      req.user._id,
-      req.user.role,
-      req.body
-    );
-    return sendResponse(res, 201, 'Checklist created successfully', result);
+    const checklist = await ChecklistService.createChecklist(req.body, req.user, req);
+    return sendResponse(res, 201, 'Checklist created successfully', checklist);
   });
 
+  // ==================== GET ALL ====================
   getChecklists = asyncHandler(async (req, res) => {
-    const result = await checklistService.getChecklists(
-      req.user._id,
-      req.user.role,
-      req.query
-    );
+    const result = await ChecklistService.getChecklists(req.query, req.user, req);
     return sendResponse(res, 200, 'Checklists retrieved successfully', result);
   });
 
+  // ==================== GET BY ID ====================
   getChecklistById = asyncHandler(async (req, res) => {
-    const result = await checklistService.getChecklistById(req.params.id);
-    return sendResponse(res, 200, 'Checklist retrieved successfully', result);
+    const checklist = await ChecklistService.getChecklistById(req.params.id, req.user, req);
+    return sendResponse(res, 200, 'Checklist retrieved successfully', checklist);
   });
 
+  // ==================== UPDATE ====================
+  updateChecklist = asyncHandler(async (req, res) => {
+    const checklist = await ChecklistService.updateChecklist(req.params.id, req.body, req.user, req);
+    return sendResponse(res, 200, 'Checklist updated successfully', checklist);
+  });
+
+  // ==================== SOFT DELETE ====================
   deleteChecklist = asyncHandler(async (req, res) => {
-    const result = await checklistService.deleteChecklist(
+    const checklist = await ChecklistService.deleteChecklist(req.params.id, req.user, req);
+    return sendResponse(res, 200, 'Checklist deleted successfully', checklist);
+  });
+
+  // ==================== RESTORE ====================
+  restoreChecklist = asyncHandler(async (req, res) => {
+    const checklist = await ChecklistService.restoreChecklist(req.params.id, req.user, req);
+    return sendResponse(res, 200, 'Checklist restored successfully', checklist);
+  });
+
+  // ==================== GET DELETED ====================
+  getDeletedChecklists = asyncHandler(async (req, res) => {
+    const result = await ChecklistService.getDeletedChecklists(req.query, req.user, req);
+    return sendResponse(res, 200, 'Deleted checklists retrieved successfully', result);
+  });
+
+  // ==================== PERMANENT DELETE ====================
+  permanentDeleteChecklist = asyncHandler(async (req, res) => {
+    const checklist = await ChecklistService.permanentDeleteChecklist(
       req.params.id,
-      req.user._id,
-      req.user.role
+      req.user,
+      req
     );
-    return sendResponse(res, 200, 'Checklist deleted successfully', result);
+    return sendResponse(res, 200, 'Checklist permanently deleted successfully', checklist);
   });
 
-  // ==================== CLONE OPERATIONS ====================
-
-  getCloneList = asyncHandler(async (req, res) => {
-    const result = await checklistService.getCloneList(
-      req.user._id,
-      req.user.role,
-      req.query
-    );
-    return sendResponse(res, 200, 'Clone list retrieved successfully', result);
-  });
-
+  // ==================== CLONE ====================
   cloneChecklist = asyncHandler(async (req, res) => {
-    const result = await checklistService.cloneChecklist(
-      req.user._id,
-      req.user.role,
+    const result = await ChecklistService.cloneChecklist(
       req.params.id,
-      req.body.newName
+      req.body,
+      req.user,
+      req
     );
     return sendResponse(res, 201, 'Checklist cloned successfully', result);
   });
 
-  // ==================== IMPORT EXCEL ====================
+  // ==================== GET CLONEABLE ====================
+  getCloneableChecklists = asyncHandler(async (req, res) => {
+    const result = await ChecklistService.getCloneableChecklists(req.query, req.user, req);
+    return sendResponse(res, 200, 'Cloneable checklists retrieved successfully', result);
+  });
 
+  // ==================== TYPES SUMMARY ====================
+  getChecklistTypesSummary = asyncHandler(async (req, res) => {
+    const summary = await ChecklistService.getChecklistTypesSummary(req.user, req);
+    return sendResponse(res, 200, 'Checklist types summary retrieved successfully', summary);
+  });
+
+  // ==================== IMPORT FROM EXCEL ====================
   importFromExcel = asyncHandler(async (req, res) => {
     if (!req.file) {
-      throw new ValidationError(['No Excel file uploaded']);
+      throw new BadRequestError('Please upload an Excel file');
     }
 
-    const result = await checklistService.importFromExcel(
-      req.user._id,
-      req.user.role,
-      req.file.path,
-      req.body
+    const {
+      checklistType = 'import',
+      isGlobal = 'false',
+    } = req.body;
+
+    // Get the full file path from multer
+    const filePath = req.file.path;
+
+    const result = await ChecklistService.importFromExcel(
+      filePath,
+      req.user,
+      {
+        checklistType,
+        isGlobal: isGlobal === 'true',
+        fileName: req.file.originalname,
+      },
+      req
     );
-    return sendResponse(res, 201, 'Checklist imported successfully', result);
-  });
 
-  // ==================== SUBMISSION ENDPOINTS ====================
+    try {
+      fs.unlinkSync(filePath);
+    } catch (unlinkError) {
+      console.error('Failed to delete temporary file:', unlinkError);
+    }
 
-  submitResponse = asyncHandler(async (req, res) => {
-    const result = await checklistService.submitResponse(
-      req.params.id,
-      req.user._id,
-      req.user.role,
-      req.body
-    );
-    return sendResponse(res, 201, 'Checklist submitted successfully', result);
-  });
-
-  getSubmissions = asyncHandler(async (req, res) => {
-    const result = await checklistService.getSubmissions(
-      req.params.id,
-      req.user._id,
-      req.user.role,
-      req.query
-    );
-    return sendResponse(res, 200, 'Submissions retrieved successfully', result);
-  });
-
-  getSubmissionById = asyncHandler(async (req, res) => {
-    const result = await checklistService.getSubmissionById(
-      req.params.submissionId,
-      req.user._id,
-      req.user.role
-    );
-    return sendResponse(res, 200, 'Submission retrieved successfully', result);
-  });
-
-  // ==================== REQUEST MANAGEMENT ====================
-
-  submitRequest = asyncHandler(async (req, res) => {
-    const result = await checklistService.submitRequest(
-      req.user._id,
-      req.user.role,
-      req.body
-    );
-    return sendResponse(res, 201, 'Checklist request submitted successfully', result);
-  });
-
-  getRequests = asyncHandler(async (req, res) => {
-    const result = await checklistService.getRequests(
-      req.user._id,
-      req.user.role,
-      req.query
-    );
-    return sendResponse(res, 200, 'Requests retrieved successfully', result);
-  });
-
-  getRequestById = asyncHandler(async (req, res) => {
-    const result = await checklistService.getRequestById(req.params.id);
-    return sendResponse(res, 200, 'Request retrieved successfully', result);
-  });
-
-  getRequestStats = asyncHandler(async (req, res) => {
-    const result = await checklistService.getRequestStats(
-      req.user._id,
-      req.user.role
-    );
-    return sendResponse(res, 200, 'Request stats retrieved successfully', result);
-  });
-
-  reviewRequest = asyncHandler(async (req, res) => {
-    const result = await checklistService.reviewRequest(
-      req.params.id,
-      req.user._id,
-      req.user.role,
-      req.body
-    );
-    return sendResponse(res, 200, 'Request reviewed successfully', result);
+    return sendResponse(res, 200, `${result.imported} checklist(s) imported successfully`, result);
   });
 }
 

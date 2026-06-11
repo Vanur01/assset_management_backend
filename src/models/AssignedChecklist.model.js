@@ -1,142 +1,148 @@
 import mongoose from 'mongoose';
 
-// ─── Sub-schemas ───────────────────────────────────────────────────────────────
+// ─── Sub-schemas ──────────────────────────────────────────────────────────────
 
 const fieldResponseSchema = new mongoose.Schema(
   {
-    fieldId: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
-    label: { type: String, trim: true },
-    fieldType: { type: String },
-    value: { type: mongoose.Schema.Types.Mixed },
-    filePaths: [{ type: String }],
-    isValid: { type: Boolean, default: true },
+    fieldId:          { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
+    label:            { type: String, trim: true },
+    fieldType:        { type: String },
+    value:            { type: mongoose.Schema.Types.Mixed },
+    filePaths:        [{ type: String }],   // uploaded image/file paths
+    isValid:          { type: Boolean, default: true },
     validationErrors: [{ type: String }],
-    answeredAt: { type: Date, default: Date.now },
+    answeredAt:       { type: Date, default: Date.now },
   },
   { _id: true }
 );
 
 const teamMemberSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  name: { type: String, trim: true },
-  email: { type: String, trim: true },
+  userId:      { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  name:        { type: String, trim: true },
+  email:       { type: String, trim: true },
   status: {
     type: String,
     enum: ['pending', 'accepted', 'in_progress', 'completed', 'rejected'],
     default: 'pending',
   },
-  assignedAt: { type: Date, default: Date.now },
+  assignedAt:  { type: Date, default: Date.now },
   completedAt: { type: Date, default: null },
 });
 
 const assetAssignmentSchema = new mongoose.Schema({
-  assetId: { type: mongoose.Schema.Types.ObjectId, ref: 'Asset', required: true },
-  assetName: { type: String, trim: true },
-  assetTagNumber: { type: String, trim: true },
+  assetId:       { type: mongoose.Schema.Types.ObjectId, ref: 'Asset', required: true },
+  assetName:     { type: String, trim: true },
+  assetTagNumber:{ type: String, trim: true },
   assetLocation: { type: String, trim: true },
   assetCategory: { type: String, trim: true },
-  assetStatus: { type: String, trim: true },
-  adminId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
-  adminName: { type: String, trim: true },
-  adminEmail: { type: String, trim: true },
-  assignedAt: { type: Date, default: Date.now },
+  assetStatus:   { type: String, trim: true },
+  assignedAt:    { type: Date, default: Date.now },
 });
+
+// ── NEW: Submission sub-schema (one per team member who submits) ───────────────
+const submissionSchema = new mongoose.Schema(
+  {
+    submittedBy:      { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    submittedByName:  { type: String, trim: true },
+    submittedByEmail: { type: String, trim: true },
+    submittedAt:      { type: Date, default: Date.now },
+
+    // Per-checklist responses inside this submission
+    checklistResponses: [{
+      checklistId:        { type: mongoose.Schema.Types.ObjectId, ref: 'Checklist' },
+      checklistName:      { type: String, trim: true },
+      responses:          [fieldResponseSchema],
+      completionRate:     { type: Number, default: 0, min: 0, max: 100 },
+      totalFieldsSnapshot:{ type: Number, default: 0 },
+    }],
+
+    // Overall metrics
+    overallCompletionRate: { type: Number, default: 0, min: 0, max: 100 },
+    score:                 { type: Number, default: null, min: 0, max: 100 },     // admin sets after review
+    overallCondition:      { type: String, trim: true },
+    inspectorName:         { type: String, trim: true },
+    notes:                 { type: String, trim: true },
+
+    // Uploaded evidence files (images, PDFs) at submission level
+    attachments: [{
+      filePath:    { type: String },
+      originalName:{ type: String },
+      mimetype:    { type: String },
+      size:        { type: Number },
+      uploadedAt:  { type: Date, default: Date.now },
+    }],
+
+    // Review
+    reviewStatus: {
+      type: String,
+      enum: ['pending_review', 'approved', 'rejected', 'needs_revision'],
+      default: 'pending_review',
+    },
+    reviewedBy:      { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    reviewedByName:  { type: String, trim: true },
+    reviewedAt:      { type: Date, default: null },
+    reviewComments:  { type: String, trim: true },
+    rejectionReason: { type: String, trim: true },
+
+    // Inspection-specific fields (mirrors UI screenshots)
+    inspectionId:    { type: String, trim: true },   // e.g. INS-2024-001
+    itemsPassed:     { type: Number, default: 0 },
+    itemsFailed:     { type: Number, default: 0 },
+    itemsNA:         { type: Number, default: 0 },
+    performanceRating:{ type: Number, default: null, min: 0, max: 5 },
+  },
+  { _id: true, timestamps: true }
+);
 
 // ─── Main schema ───────────────────────────────────────────────────────────────
 
 const assignmentSchema = new mongoose.Schema(
   {
-    // ── References ──────────────────────────────────────────────────────────────
-    checklist: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Checklist',
-      required: true,
-      index: true,
-    },
-    checklistName: { type: String, trim: true },
-    checklistVersion: { type: String, trim: true },
-    checklistData: { type: mongoose.Schema.Types.Mixed, default: null },
+    // ── References ────────────────────────────────────────────────────────────
+    checklistIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Checklist' }],
 
-    checklistRequest: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'ChecklistRequest',
-      default: null,
-      index: true,
-    },
-    checklistRequestName: { type: String, trim: true },
+    checklistData: [{
+      checklistId:         { type: mongoose.Schema.Types.ObjectId, ref: 'Checklist' },
+      name:                { type: String, trim: true },
+      version:             { type: String },
+      type:                { type: String },
+      category:            { type: String },
+      responses:           [fieldResponseSchema],         // legacy field kept for compat
+      totalFieldsSnapshot: { type: Number, default: 0 },
+      completionRate:      { type: Number, default: 0, min: 0, max: 100 },
+    }],
 
-    // ── Assignment hierarchy ─────────────────────────────────────────────────────
-    assignedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      required: true,
-    },
-    assignedByRole: {
-      type: String,
-      enum: ['super_admin', 'admin', 'team'],
-      required: true,
-    },
-    assignedToAdmin: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      default: null,
-      index: true,
-    },
-    assignedToAdminName: { type: String, trim: true },
+    // ── Hierarchy ─────────────────────────────────────────────────────────────
+    assignedBy:     { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    assignedByRole: { type: String, enum: ['super_admin', 'admin'] },
+
+    assignedToAdmin:     { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
+    assignedToAdminName: { type: String },
 
     assignedToTeamMembers: [teamMemberSchema],
 
-    // ── Reassignment tracking ───────────────────────────────────────────────────
-    reassignedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
-    reassignedByRole: { type: String, enum: ['super_admin', 'admin', 'team'], default: null },
-    reassignedAt: { type: Date, default: null },
-    reassignmentHistory: [{
-      fromType: { type: String, enum: ['admin', 'team'] },
-      fromId: { type: mongoose.Schema.Types.ObjectId },
-      toType: { type: String, enum: ['admin', 'team'] },
-      toId: { type: mongoose.Schema.Types.Mixed },
-      reassignedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-      reassignedAt: { type: Date, default: Date.now },
-      reason: { type: String, trim: true },
-    }],
+    // ── Assets ────────────────────────────────────────────────────────────────
+    assetIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Asset' }],
+    assets:   [assetAssignmentSchema],
 
-    // ── Customer ─────────────────────────────────────────────────────────────────
-    customerId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      default: null,
-      index: true,
-    },
-    customerName: { type: String, trim: true },
+    // ── Customer ──────────────────────────────────────────────────────────────
+    customerId:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
+    customerName:  { type: String, trim: true },
     customerEmail: { type: String, trim: true },
-    customerPhone: { type: String, trim: true },
 
-    // ── Assets ───────────────────────────────────────────────────────────────────
-    assets: [assetAssignmentSchema],
-    assetData: { type: mongoose.Schema.Types.Mixed, default: null },
-
-    // ── Dates ────────────────────────────────────────────────────────────────────
-    dueDate: { type: Date, required: [true, 'Due date is required'], index: true },
-    assignedAt: { type: Date, default: Date.now },
-    startedAt: { type: Date, default: null },
+    // ── Dates ─────────────────────────────────────────────────────────────────
+    dueDate:     { type: Date, index: true },
+    assignedAt:  { type: Date, default: Date.now },
+    startedAt:   { type: Date, default: null },
     submittedAt: { type: Date, default: null },
     completedAt: { type: Date, default: null },
-    reviewedAt: { type: Date, default: null },
 
-    // ── Status ───────────────────────────────────────────────────────────────────
+    // ── Status / Priority ─────────────────────────────────────────────────────
     status: {
       type: String,
-      enum: [
-        'pending', 'in_progress', 'submitted',
-        'under_review', 'approved', 'rejected', 'completed', 'overdue',
-      ],
+      enum: ['pending', 'in_progress', 'submitted', 'approved', 'rejected', 'completed', 'overdue'],
       default: 'pending',
       index: true,
-    },
-    submissionStatus: {
-      type: String,
-      enum: ['pending_review', 'approved', 'rejected', 'needs_revision'],
-      default: null,
     },
     priority: {
       type: String,
@@ -145,46 +151,56 @@ const assignmentSchema = new mongoose.Schema(
       index: true,
     },
 
-    // ── Form responses ───────────────────────────────────────────────────────────
-    responses: [fieldResponseSchema],
+    // ── NEW: Submissions list (many-to-one: each team member submits once) ────
+    submissions: [submissionSchema],
 
-    totalFieldsSnapshot: { type: Number, default: 0 },
+    // Aggregate stats derived from submissions
+    totalSubmissions:    { type: Number, default: 0 },
+    approvedSubmissions: { type: Number, default: 0 },
+    avgScore:            { type: Number, default: null },
 
-    completionRate: { type: Number, default: 0, min: 0, max: 100 },
-
-    // ── Review ───────────────────────────────────────────────────────────────────
-    reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
-    reviewedByName: { type: String, trim: true },
+    // ── Review (assignment-level, kept for admin-assigned) ────────────────────
+    reviewedBy:      { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     rejectionReason: { type: String, trim: true },
-    reviewComments: { type: String, trim: true },
+    reviewComments:  { type: String, trim: true },
 
-    // ── Misc ─────────────────────────────────────────────────────────────────────
-    notes: { type: String, trim: true },
-    inspectorNotes: { type: String, trim: true },
-    overallRating: { type: Number, min: 1, max: 5 },
-    isDraft: { type: Boolean, default: false },
-    draftCount: { type: Number, default: 0 },
-    lastSavedAt: { type: Date, default: null },
+    // ── Soft delete ───────────────────────────────────────────────────────────
+    isDeleted: { type: Boolean, default: false, index: true },
+    deletedAt: { type: Date, default: null },
+    deletedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
 
-    // ── Files ────────────────────────────────────────────────────────────────────
-    uploadedPhotos: [{ type: String }],
-    signaturePath: { type: String },
-    attachments: [{
-      name: String,
-      url: String,
-      uploadedAt: { type: Date, default: Date.now },
+    // ── Reassignment ──────────────────────────────────────────────────────────
+    isReassigned:         { type: Boolean, default: false },
+    originalAssignmentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Assignments', default: null },
+    reassignedAt:         { type: Date, default: null },
+    reassignedBy:         { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    reassignmentReason:   { type: String, trim: true },
+
+    reassignmentHistory: [{
+      fromType:       { type: String, enum: ['admin', 'team'] },
+      fromId:         { type: mongoose.Schema.Types.ObjectId },
+      toType:         { type: String, enum: ['admin', 'team'] },
+      toIds:          [{ type: mongoose.Schema.Types.ObjectId }],
+      reassignedBy:   { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+      reassignedAt:   { type: Date, default: Date.now },
+      reason:         { type: String, trim: true },
+      oldChecklistIds:[{ type: mongoose.Schema.Types.ObjectId }],
+      newChecklistIds:[{ type: mongoose.Schema.Types.ObjectId }],
+      oldAssetIds:    [{ type: mongoose.Schema.Types.ObjectId }],
+      newAssetIds:    [{ type: mongoose.Schema.Types.ObjectId }],
     }],
 
-    // ── Metadata ─────────────────────────────────────────────────────────────────
+    // ── Misc ──────────────────────────────────────────────────────────────────
+    notes: { type: String, trim: true },
     metadata: {
-      location: { type: String, trim: true },
+      location:   { type: String, trim: true },
       department: { type: String, trim: true },
-      tags: [{ type: String, trim: true }],
+      tags:       [{ type: String, trim: true }],
     },
   },
   {
     timestamps: true,
-    toJSON: { virtuals: true },
+    toJSON:   { virtuals: true },
     toObject: { virtuals: true },
   }
 );
@@ -192,44 +208,22 @@ const assignmentSchema = new mongoose.Schema(
 // ─── Indexes ──────────────────────────────────────────────────────────────────
 
 assignmentSchema.index({ assignedBy: 1, createdAt: -1 });
-assignmentSchema.index({ assignedToAdmin: 1, status: 1 });
-assignmentSchema.index({ customerId: 1, status: 1 });
-assignmentSchema.index({ checklist: 1, status: 1 });
-assignmentSchema.index({ checklistRequest: 1, status: 1 });
-assignmentSchema.index({ dueDate: 1, status: 1 });
+assignmentSchema.index({ assignedToAdmin: 1, status: 1, isDeleted: 1 });
+assignmentSchema.index({ customerId: 1, status: 1, isDeleted: 1 });
+assignmentSchema.index({ dueDate: 1, status: 1, isDeleted: 1 });
 assignmentSchema.index({ priority: 1, status: 1 });
-assignmentSchema.index({ status: 1, dueDate: 1 });
-assignmentSchema.index({ status: 1, createdAt: -1 });
-assignmentSchema.index({ 'assignedToTeamMembers.userId': 1, status: 1 });
-assignmentSchema.index({ 'assets.assetId': 1, status: 1 });
-
-// Compound indexes
+assignmentSchema.index({ 'assignedToTeamMembers.userId': 1, status: 1, isDeleted: 1 });
+assignmentSchema.index({ 'assets.assetId': 1, status: 1, isDeleted: 1 });
+assignmentSchema.index({ isDeleted: 1, deletedAt: 1 });
+assignmentSchema.index({ originalAssignmentId: 1 });
+assignmentSchema.index({ checklistIds: 1 });
+assignmentSchema.index({ assetIds: 1 });
+assignmentSchema.index({ 'submissions.submittedBy': 1 });
+assignmentSchema.index({ 'submissions.reviewStatus': 1 });
+// Compound
 assignmentSchema.index({ assignedToAdmin: 1, status: 1, dueDate: 1 });
-assignmentSchema.index({ customerId: 1, status: 1, dueDate: 1 });
-assignmentSchema.index({ checklistRequest: 1, status: 1, createdAt: -1 });
 assignmentSchema.index({ 'assignedToTeamMembers.userId': 1, status: 1, dueDate: 1 });
-assignmentSchema.index({ 'assets.assetId': 1, status: 1, dueDate: 1 });
-assignmentSchema.index({ status: 1, submissionStatus: 1, createdAt: -1 });
-assignmentSchema.index({ reassignedBy: 1, reassignedAt: -1 });
-assignmentSchema.index({ 'reassignmentHistory.reassignedAt': -1 });
-
-// Full-text search
-assignmentSchema.index(
-  {
-    customerName: 'text',
-    checklistName: 'text',
-    'assets.assetName': 'text',
-    'assets.assetTagNumber': 'text',
-  },
-  {
-    weights: {
-      customerName: 2,
-      checklistName: 3,
-      'assets.assetName': 1,
-      'assets.assetTagNumber': 1,
-    },
-  }
-);
+assignmentSchema.index({ isDeleted: 1, status: 1, dueDate: 1 });
 
 // ─── Virtuals ─────────────────────────────────────────────────────────────────
 
@@ -247,22 +241,16 @@ assignmentSchema.virtual('daysRemaining').get(function () {
   return days > 0 ? days : 0;
 });
 
-assignmentSchema.virtual('daysOverdue').get(function () {
-  if (!this.isOverdue) return 0;
-  const days = Math.ceil((new Date() - this.dueDate) / (1000 * 60 * 60 * 24));
-  return days > 0 ? days : 0;
+assignmentSchema.virtual('totalChecklists').get(function () {
+  return this.checklistIds?.length || 0;
+});
+
+assignmentSchema.virtual('totalAssets').get(function () {
+  return this.assetIds?.length || 0;
 });
 
 assignmentSchema.virtual('totalTeamMembers').get(function () {
   return this.assignedToTeamMembers?.length || 0;
-});
-
-assignmentSchema.virtual('totalAssets').get(function () {
-  return this.assets?.length || 0;
-});
-
-assignmentSchema.virtual('completedTeamMembers').get(function () {
-  return this.assignedToTeamMembers?.filter(tm => tm.status === 'completed').length || 0;
 });
 
 // ─── Pre-save middleware ───────────────────────────────────────────────────────
@@ -271,56 +259,82 @@ assignmentSchema.pre('save', async function (next) {
   try {
     const now = new Date();
 
-    // Auto-mark overdue (only for non-terminal statuses)
+    // Auto-mark overdue
     if (
-      this.dueDate &&
-      this.dueDate < now &&
-      !['completed', 'approved', 'rejected', 'submitted', 'under_review'].includes(this.status)
+      this.dueDate && this.dueDate < now &&
+      !['completed', 'approved', 'rejected', 'submitted'].includes(this.status) &&
+      !this.isDeleted
     ) {
       this.status = 'overdue';
     }
 
-    // Calculate completion rate
-    if (this.responses && this.responses.length > 0) {
-      const answeredFields = this.responses.filter(r => {
-        const val = r.value;
-        return (
-          val !== null &&
-          val !== undefined &&
-          val !== '' &&
-          !(Array.isArray(val) && val.length === 0)
-        );
-      }).length;
+    // Calculate completion rates for legacy checklistData
+    if (this.checklistData?.length > 0) {
+      for (const checklist of this.checklistData) {
+        if (checklist.responses?.length > 0) {
+          const answered = checklist.responses.filter(r => {
+            const v = r.value;
+            return v !== null && v !== undefined && v !== '' &&
+                   !(Array.isArray(v) && v.length === 0);
+          }).length;
+          const denom = checklist.totalFieldsSnapshot > 0
+            ? checklist.totalFieldsSnapshot
+            : checklist.responses.length;
+          checklist.completionRate = Math.min(100, Math.round((answered / denom) * 100));
+        } else {
+          checklist.completionRate = 0;
+        }
+      }
+    }
 
-      const denominator = this.totalFieldsSnapshot > 0
-        ? this.totalFieldsSnapshot
-        : this.responses.length;
-
-      this.completionRate = Math.min(
-        100,
-        Math.round((answeredFields / denominator) * 100)
-      );
-    } else {
-      this.completionRate = 0;
+    // Aggregate submission stats
+    if (this.submissions?.length > 0) {
+      this.totalSubmissions    = this.submissions.length;
+      this.approvedSubmissions = this.submissions.filter(s => s.reviewStatus === 'approved').length;
+      const scores = this.submissions.map(s => s.score).filter(s => s != null);
+      this.avgScore = scores.length > 0
+        ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
+        : null;
     }
 
     next();
-  } catch (error) {
-    next(error);
+  } catch (err) {
+    next(err);
   }
 });
 
 // ─── Instance methods ─────────────────────────────────────────────────────────
 
+assignmentSchema.methods.softDelete = async function (deletedByUserId) {
+  this.isDeleted = true;
+  this.deletedAt = new Date();
+  this.deletedBy = deletedByUserId;
+  await this.save();
+  return this;
+};
+
+assignmentSchema.methods.restore = async function () {
+  this.isDeleted = false;
+  this.deletedAt = null;
+  this.deletedBy = null;
+  if (this.status === 'deleted') this.status = 'pending';
+  await this.save();
+  return this;
+};
+
+assignmentSchema.methods.permanentDelete = async function () {
+  await this.deleteOne();
+  return true;
+};
+
 assignmentSchema.methods.updateStatus = async function (newStatus, userId, notes = '') {
   const validTransitions = {
-    pending: ['in_progress', 'overdue'],
+    pending:     ['in_progress', 'overdue'],
     in_progress: ['submitted', 'overdue'],
-    submitted: ['under_review', 'rejected'],
-    under_review: ['approved', 'rejected'],
-    rejected: ['pending', 'in_progress'],
-    approved: ['completed'],
-    overdue: ['in_progress', 'submitted'],
+    submitted:   ['approved', 'rejected'],
+    rejected:    ['pending', 'in_progress'],
+    approved:    ['completed'],
+    overdue:     ['in_progress', 'submitted'],
   };
 
   if (validTransitions[this.status] && !validTransitions[this.status].includes(newStatus)) {
@@ -328,23 +342,11 @@ assignmentSchema.methods.updateStatus = async function (newStatus, userId, notes
   }
 
   this.status = newStatus;
-
   if (newStatus === 'in_progress' && !this.startedAt) this.startedAt = new Date();
-  if (newStatus === 'submitted') {
-    this.submittedAt = new Date();
-    this.submissionStatus = 'pending_review';
-    this.isDraft = false;
-  }
-  if (newStatus === 'approved') {
-    this.completedAt = new Date();
-    this.submissionStatus = 'approved';
-  }
-  if (newStatus === 'rejected') {
-    this.rejectionReason = notes;
-    this.submissionStatus = 'rejected';
-  }
-
-  if (notes) this.notes = notes;
+  if (newStatus === 'submitted') this.submittedAt = new Date();
+  if (newStatus === 'approved')  this.completedAt = new Date();
+  if (newStatus === 'rejected' && notes) this.rejectionReason = notes;
+  if (notes)  this.notes = notes;
   if (userId) this.reviewedBy = userId;
 
   await this.save();
@@ -352,19 +354,16 @@ assignmentSchema.methods.updateStatus = async function (newStatus, userId, notes
 };
 
 assignmentSchema.methods.updateTeamMemberStatus = async function (teamMemberId, status) {
-  const teamMember = this.assignedToTeamMembers.find(
-    tm => tm.userId.toString() === teamMemberId.toString()
+  const tm = this.assignedToTeamMembers.find(
+    t => t.userId.toString() === teamMemberId.toString()
   );
-  if (!teamMember) throw new Error('Team member not found in this assignment');
+  if (!tm) throw new Error('Team member not found');
 
-  teamMember.status = status;
-  if (status === 'completed') teamMember.completedAt = new Date();
+  tm.status = status;
+  if (status === 'completed') tm.completedAt = new Date();
 
-  const allCompleted =
-    this.assignedToTeamMembers.length > 0 &&
-    this.assignedToTeamMembers.every(tm => tm.status === 'completed');
-
-  if (allCompleted && !['completed', 'approved'].includes(this.status)) {
+  const allDone = this.assignedToTeamMembers.every(t => t.status === 'completed');
+  if (allDone && this.status !== 'completed') {
     this.status = 'completed';
     this.completedAt = new Date();
   }
@@ -373,47 +372,53 @@ assignmentSchema.methods.updateTeamMemberStatus = async function (teamMemberId, 
   return this;
 };
 
-assignmentSchema.methods.addAsset = async function (assetData) {
-  if (!this.assets) this.assets = [];
-
-  if (this.assets.some(a => a.assetId.toString() === assetData.assetId.toString())) {
-    throw new Error('Asset already assigned to this checklist');
-  }
-
-  this.assets.push({
-    assetId: assetData.assetId,
-    assetName: assetData.assetName,
-    assetTagNumber: assetData.assetTagNumber,
-    assetLocation: assetData.assetLocation,
-    assetCategory: assetData.assetCategory,
-    assetStatus: assetData.assetStatus,
-    adminId: assetData.adminId,
-    adminName: assetData.adminName,
-    adminEmail: assetData.adminEmail,
-    assignedAt: new Date(),
-  });
-
-  await this.save();
-  return this;
-};
-
-assignmentSchema.methods.removeAsset = async function (assetId) {
-  this.assets = this.assets.filter(a => a.assetId.toString() !== assetId.toString());
-  await this.save();
-  return this;
-};
-
-assignmentSchema.methods.addResponse = async function (fieldId, value, fieldLabel, fieldType) {
-  const existingIndex = this.responses.findIndex(
-    r => r.fieldId.toString() === fieldId.toString()
+// Add or update a submission
+assignmentSchema.methods.addSubmission = async function (submissionData) {
+  const existingIdx = this.submissions.findIndex(
+    s => s.submittedBy.toString() === submissionData.submittedBy.toString()
   );
 
-  const response = { fieldId, label: fieldLabel, fieldType, value, answeredAt: new Date() };
-
-  if (existingIndex !== -1) {
-    this.responses[existingIndex] = { ...this.responses[existingIndex].toObject(), ...response };
+  if (existingIdx !== -1) {
+    // Update existing submission
+    this.submissions[existingIdx] = {
+      ...this.submissions[existingIdx].toObject(),
+      ...submissionData,
+      updatedAt: new Date(),
+    };
   } else {
-    this.responses.push(response);
+    this.submissions.push(submissionData);
+  }
+
+  // Update assignment-level status
+  if (this.status === 'pending' || this.status === 'in_progress') {
+    this.status = 'submitted';
+    this.submittedAt = new Date();
+  }
+
+  await this.save();
+  return this;
+};
+
+// Review a submission
+assignmentSchema.methods.reviewSubmission = async function (submissionId, reviewData) {
+  const sub = this.submissions.id(submissionId);
+  if (!sub) throw new Error('Submission not found');
+
+  sub.reviewStatus   = reviewData.reviewStatus;
+  sub.reviewedBy     = reviewData.reviewedBy;
+  sub.reviewedByName = reviewData.reviewedByName;
+  sub.reviewedAt     = new Date();
+  sub.reviewComments = reviewData.reviewComments || '';
+  if (reviewData.reviewStatus === 'rejected') {
+    sub.rejectionReason = reviewData.rejectionReason || '';
+  }
+  if (reviewData.score != null) sub.score = reviewData.score;
+
+  // If all submissions approved → mark assignment approved
+  const allApproved = this.submissions.every(s => s.reviewStatus === 'approved');
+  if (allApproved) {
+    this.status = 'approved';
+    this.completedAt = new Date();
   }
 
   await this.save();
@@ -423,147 +428,60 @@ assignmentSchema.methods.addResponse = async function (fieldId, value, fieldLabe
 assignmentSchema.methods.getSummary = function () {
   return {
     id: this._id,
-    checklist: { id: this.checklist, name: this.checklistName, version: this.checklistVersion },
-    assets: this.assets.map(a => ({ id: a.assetId, name: a.assetName, tagNumber: a.assetTagNumber })),
+    checklists: this.checklistData.map(c => ({
+      id: c.checklistId, name: c.name, completionRate: c.completionRate,
+    })),
+    assets: this.assets.map(a => ({
+      id: a.assetId, name: a.assetName, tagNumber: a.assetTagNumber,
+    })),
+    assignedTo: this.assignedToAdmin
+      ? { type: 'admin', id: this.assignedToAdmin, name: this.assignedToAdminName }
+      : { type: 'team', members: this.assignedToTeamMembers.length },
     status: this.status,
     priority: this.priority,
-    completionRate: this.completionRate,
     dueDate: this.dueDate,
     daysRemaining: this.daysRemaining,
     isOverdue: this.isOverdue,
-    totalTeamMembers: this.totalTeamMembers,
-    totalAssets: this.totalAssets,
+    totalSubmissions: this.totalSubmissions,
+    approvedSubmissions: this.approvedSubmissions,
+    avgScore: this.avgScore,
   };
 };
 
 // ─── Static methods ───────────────────────────────────────────────────────────
 
-assignmentSchema.statics.getByAdmin = async function (adminId, filters = {}) {
-  const query = { assignedToAdmin: adminId };
-  if (filters.status) query.status = filters.status;
-  if (filters.priority) query.priority = filters.priority;
-  if (filters.checklistId) query.checklist = filters.checklistId;
+assignmentSchema.statics.getActive  = function () { return this.find({ isDeleted: false }); };
+assignmentSchema.statics.getDeleted = function () { return this.find({ isDeleted: true });  };
 
-  const page = parseInt(filters.page) || 1;
-  const limit = Math.min(parseInt(filters.limit) || 10, 100);
-  const skip = (page - 1) * limit;
-
-  const [assignments, total] = await Promise.all([
-    this.find(query)
-      .populate('checklist', 'name version category')
-      .populate('assignedToTeamMembers.userId', 'name email')
-      .populate('assets.assetId', 'assetName tagNumber currentLocation')
-      .populate('customerId', 'name email')
-      .sort({ dueDate: 1, priority: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    this.countDocuments(query),
-  ]);
-
-  return {
-    assignments,
-    pagination: { page, limit, total, pages: Math.ceil(total / limit) },
-  };
-};
-
-assignmentSchema.statics.getStatistics = async function (userId, userRole) {
-  const matchStage =
-    userRole === 'admin'
-      ? { assignedToAdmin: userId }
-      : userRole === 'team'
-        ? { 'assignedToTeamMembers.userId': userId }
-        : {};
-
-  const [stats] = await this.aggregate([
-    { $match: matchStage },
-    {
-      $group: {
-        _id: null,
-        total: { $sum: 1 },
-        pending: { $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] } },
-        inProgress: { $sum: { $cond: [{ $eq: ['$status', 'in_progress'] }, 1, 0] } },
-        submitted: { $sum: { $cond: [{ $eq: ['$status', 'submitted'] }, 1, 0] } },
-        completed: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
-        approved: { $sum: { $cond: [{ $eq: ['$status', 'approved'] }, 1, 0] } },
-        rejected: { $sum: { $cond: [{ $eq: ['$status', 'rejected'] }, 1, 0] } },
-        overdue: { $sum: { $cond: [{ $eq: ['$status', 'overdue'] }, 1, 0] } },
-        avgCompletion: { $avg: '$completionRate' },
-      },
-    },
-  ]);
-
-  return stats || {
-    total: 0, pending: 0, inProgress: 0, submitted: 0,
-    completed: 0, approved: 0, rejected: 0, overdue: 0, avgCompletion: 0,
-  };
-};
-
-assignmentSchema.statics.checkExistingAssignment = async function (checklistId, assigneeId, assigneeType) {
+assignmentSchema.statics.checkExistingAssignment = async function (checklistIds, assigneeId, assigneeType) {
   const query = {
-    checklist: checklistId,
-    status: { $in: ['pending', 'in_progress', 'submitted'] }
+    checklistIds: { $in: checklistIds },
+    isDeleted: false,
+    status: { $in: ['pending', 'in_progress', 'submitted'] },
   };
-
-  if (assigneeType === 'admin') {
-    query.assignedToAdmin = assigneeId;
-  } else if (assigneeType === 'team') {
-    query['assignedToTeamMembers.userId'] = assigneeId;
-  }
+  if (assigneeType === 'admin') query.assignedToAdmin = assigneeId;
+  else if (assigneeType === 'team') query['assignedToTeamMembers.userId'] = assigneeId;
 
   const existing = await this.findOne(query);
-
-  if (existing) {
-    return {
-      exists: true,
-      assignment: existing,
-      status: existing.status,
-      message: `This checklist is already assigned to this ${assigneeType}`
-    };
-  }
-
-  return { exists: false };
+  return existing
+    ? { exists: true,  assignment: existing, status: existing.status }
+    : { exists: false };
 };
 
-assignmentSchema.statics.getAssignmentHistory = async function (checklistId, assigneeId, assigneeType) {
-  const query = {
-    checklist: checklistId,
-    status: { $in: ['completed', 'approved', 'rejected'] }
-  };
-
-  if (assigneeType === 'admin') {
-    query.assignedToAdmin = assigneeId;
-  } else if (assigneeType === 'team') {
-    query['assignedToTeamMembers.userId'] = assigneeId;
-  }
-
-  const history = await this.find(query)
-    .sort({ createdAt: -1 })
-    .lean();
-
-  return {
-    hasHistory: history.length > 0,
-    count: history.length,
-    assignments: history
-  };
-};
-
-// ─── Post-save middleware ─────────────────────────────────────────────────────
+// ─── Post-save: update checklist stats ───────────────────────────────────────
 
 assignmentSchema.post('save', async function (doc) {
-  if (doc.isNew && doc.checklist) {
+  if (doc.isNew && doc.checklistIds?.length > 0) {
     try {
-      await mongoose.model('Checklist').updateOne(
-        { _id: doc.checklist },
+      await mongoose.model('Checklist').updateMany(
+        { _id: { $in: doc.checklistIds } },
         { $inc: { totalAssignments: 1 }, $set: { lastAssignedAt: new Date() } }
       );
-    } catch (error) {
-      console.error('Error updating checklist stats after assignment save:', error);
+    } catch (err) {
+      console.error('Error updating checklist stats:', err);
     }
   }
 });
-
-// ─── Model export ─────────────────────────────────────────────────────────────
 
 const Assignment = mongoose.model('Assignments', assignmentSchema);
 export default Assignment;

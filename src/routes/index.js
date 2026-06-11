@@ -21,7 +21,7 @@ const apiV1Router = express.Router();
 
 
 apiV1Router.use('/assets', assetRouter);
-apiV1Router.use('/checklist', ChecklistRouter);
+apiV1Router.use('/checklists', ChecklistRouter);
 apiV1Router.use('/dashboard', dashboardRouter);
 apiV1Router.use('/assignments', AssignmentRouters);
 apiV1Router.use('/checklist-requests', requestChecklistRouter);

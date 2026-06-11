@@ -16,9 +16,9 @@ class DashboardController {
    *   endDate    {string}  - ISO date override
    *
    * Roles:
-   *   super_admin  → clients, revenue, checklists, assignments, requests, activities
-   *   admin        → team, assets, checklists, inspections, activities
-   *   team         → own tasks, upcoming, weekly trend
+   *   super_admin  → clients, revenue, checklists, assignments, contact inquiries, activities
+   *   admin        → team, assets, checklists, assignments, activities
+   *   team         → own tasks, upcoming, weekly trend, completed checklists
    */
   getDashboard = asyncHandler(async (req, res) => {
     const { userRole, userId } = req;
